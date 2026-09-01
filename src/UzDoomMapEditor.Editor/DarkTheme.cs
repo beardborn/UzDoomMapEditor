@@ -93,6 +93,22 @@ internal static class DarkTheme
                 case TextBoxBase textBox:
                     textBox.BackColor = Surface;
                     textBox.ForeColor = Text;
+                    textBox.BorderStyle = BorderStyle.FixedSingle;
+                    break;
+
+                case ComboBox comboBox:
+                    comboBox.BackColor = SurfaceRaised;
+                    comboBox.ForeColor = Text;
+                    comboBox.FlatStyle = FlatStyle.Flat;
+                    break;
+
+                case Button button:
+                    button.BackColor = SurfaceRaised;
+                    button.ForeColor = Text;
+                    button.FlatStyle = FlatStyle.Flat;
+                    button.FlatAppearance.BorderColor = Border;
+                    button.FlatAppearance.MouseOverBackColor = AccentHover;
+                    button.FlatAppearance.MouseDownBackColor = Accent;
                     break;
 
                 case ListView listView:
