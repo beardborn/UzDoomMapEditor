@@ -14,20 +14,46 @@ internal static class DarkTheme
     public static readonly Color Accent = Color.FromArgb(72, 158, 214);
     public static readonly Color AccentHover = Color.FromArgb(58, 122, 165);
 
-    public static void Apply(Form form, MenuStrip menu, ToolStrip toolbar, StatusStrip status, PropertyGrid properties)
+    public static void Apply(Form form)
     {
         form.BackColor = Window;
         form.ForeColor = Text;
 
+        var menu = FindControl<MenuStrip>(form);
+        var status = FindControl<StatusStrip>(form);
+        var properties = FindControl<PropertyGrid>(form);
+        var toolbar = FindControls<ToolStrip>(form)
+            .FirstOrDefault(strip => strip is not MenuStrip && strip is not StatusStrip);
+
         var renderer = new ToolStripProfessionalRenderer(new DarkColorTable());
-        menu.Renderer = renderer;
-        toolbar.Renderer = renderer;
-        status.Renderer = renderer;
 
-        StyleToolStrip(menu);
-        StyleToolStrip(toolbar);
-        StyleToolStrip(status);
+        if (menu is not null)
+        {
+            menu.Renderer = renderer;
+            StyleToolStrip(menu);
+        }
 
+        if (toolbar is not null)
+        {
+            toolbar.Renderer = renderer;
+            StyleToolStrip(toolbar);
+        }
+
+        if (status is not null)
+        {
+            status.Renderer = renderer;
+            StyleToolStrip(status);
+        }
+
+        if (properties is not null)
+            StylePropertyGrid(properties);
+
+        ApplyRecursive(form);
+        TryEnableDarkTitleBar(form);
+    }
+
+    private static void StylePropertyGrid(PropertyGrid properties)
+    {
         properties.BackColor = Panel;
         properties.ViewBackColor = Panel;
         properties.ViewForeColor = Text;
@@ -37,9 +63,21 @@ internal static class DarkTheme
         properties.CommandsBackColor = Surface;
         properties.CommandsForeColor = Text;
         properties.LineColor = Border;
+    }
 
-        ApplyRecursive(form);
-        TryEnableDarkTitleBar(form);
+    private static T? FindControl<T>(Control parent) where T : Control
+        => FindControls<T>(parent).FirstOrDefault();
+
+    private static IEnumerable<T> FindControls<T>(Control parent) where T : Control
+    {
+        foreach (Control child in parent.Controls)
+        {
+            if (child is T match)
+                yield return match;
+
+            foreach (var nested in FindControls<T>(child))
+                yield return nested;
+        }
     }
 
     private static void ApplyRecursive(Control parent)
@@ -48,7 +86,7 @@ internal static class DarkTheme
         {
             switch (control)
             {
-                // These paint their own editor backgrounds already.
+                // These already paint their own dark editor backgrounds.
                 case MapCanvas:
                 case Map3DPreview:
                     break;
