@@ -6,6 +6,9 @@ internal static class Program
     private static void Main()
     {
         ApplicationConfiguration.Initialize();
-        Application.Run(new MainForm());
+
+        var mainForm = new MainForm();
+        DarkTheme.Apply(mainForm);
+        Application.Run(mainForm);
     }
 }
