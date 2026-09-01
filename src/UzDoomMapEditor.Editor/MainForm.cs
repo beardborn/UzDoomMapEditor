@@ -8,6 +8,7 @@ public sealed class MainForm : Form
 {
     private readonly MapCanvas _canvas = new();
     private readonly Map3DPreview _preview = new();
+    private readonly TextureBrowserControl _assetBrowser = new();
     private readonly PropertyGrid _properties = new() { Dock = DockStyle.Fill, HelpVisible = true, ToolbarVisible = false };
     private readonly ToolStripStatusLabel _status = new("Ready");
     private readonly EditorHistory _history = new();
@@ -18,7 +19,9 @@ public sealed class MainForm : Form
     private ToolStripComboBox _gridCombo = null!;
 
     private EditorProject _project = new();
+    private object? _selectedObject;
     private string? _projectPath;
+    private string? _projectRoot;
     private string? _uzDoomPath;
     private string? _iwadPath;
 
@@ -47,6 +50,17 @@ public sealed class MainForm : Form
         _canvas.Dock = DockStyle.Fill;
         _preview.Dock = DockStyle.Fill;
 
+        var editorAndAssets = new SplitContainer
+        {
+            Dock = DockStyle.Fill,
+            Orientation = Orientation.Horizontal,
+            SplitterDistance = 650,
+            FixedPanel = FixedPanel.Panel2,
+            Panel2MinSize = 170
+        };
+        editorAndAssets.Panel1.Controls.Add(workspace);
+        editorAndAssets.Panel2.Controls.Add(_assetBrowser);
+
         var outer = new SplitContainer
         {
             Dock = DockStyle.Fill,
@@ -54,7 +68,7 @@ public sealed class MainForm : Form
             SplitterDistance = 1160,
             FixedPanel = FixedPanel.Panel2
         };
-        outer.Panel1.Controls.Add(workspace);
+        outer.Panel1.Controls.Add(editorAndAssets);
         outer.Panel2.Controls.Add(_properties);
 
         Controls.Add(outer);
@@ -65,11 +79,16 @@ public sealed class MainForm : Form
 
         _canvas.SelectionChanged += selected =>
         {
+            _selectedObject = selected;
             _properties.SelectedObject = selected;
             _properties.Refresh();
         };
         _canvas.ProjectEdited += CommitEdit;
         _canvas.ProjectPreviewChanged += RefreshViews;
+
+        _assetBrowser.ApplyRequested += ApplyTextureAsset;
+        _assetBrowser.AssetImported += asset =>
+            _status.Text = $"Imported {asset.Name} as {asset.Category} texture";
 
         _properties.PropertyValueChanged += (_, _) =>
         {
@@ -78,6 +97,7 @@ public sealed class MainForm : Form
         };
 
         ApplyProject(new EditorProject(), resetHistory: true, resetViews: true);
+        ConfigureProjectAssets();
         SetTool(EditorTool.Select);
     }
 
@@ -86,7 +106,8 @@ public sealed class MainForm : Form
         var menu = new MenuStrip();
 
         var file = new ToolStripMenuItem("&File");
-        file.DropDownItems.Add(new ToolStripMenuItem("&New", null, (_, _) => NewProject(), Keys.Control | Keys.N));
+        file.DropDownItems.Add(new ToolStripMenuItem("Create &Game Project...", null, (_, _) => CreateGameProject(), Keys.Control | Keys.Shift | Keys.N));
+        file.DropDownItems.Add(new ToolStripMenuItem("&New Map", null, (_, _) => NewProject(), Keys.Control | Keys.N));
         file.DropDownItems.Add(new ToolStripMenuItem("&Open...", null, (_, _) => OpenProject(), Keys.Control | Keys.O));
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add(new ToolStripMenuItem("&Save", null, (_, _) => SaveProject(), Keys.Control | Keys.S));
@@ -105,12 +126,19 @@ public sealed class MainForm : Form
         view.DropDownItems.Add(new ToolStripMenuItem("Reset 2D View", null, (_, _) => _canvas.ResetView()));
         view.DropDownItems.Add(new ToolStripMenuItem("Reset 3D View", null, (_, _) => _preview.ResetView()));
 
+        var assets = new ToolStripMenuItem("&Assets");
+        assets.DropDownItems.Add(new ToolStripMenuItem("&Import PNG Texture...", null, (_, _) => _assetBrowser.ImportCurrentCategory()));
+        assets.DropDownItems.Add(new ToolStripMenuItem("&Refresh Texture Browser", null, (_, _) => _assetBrowser.Reload()));
+        assets.DropDownItems.Add(new ToolStripMenuItem("Open Project Asset &Folder", null, (_, _) => OpenAssetFolder()));
+
         var build = new ToolStripMenuItem("&Build");
         build.DropDownItems.Add(new ToolStripMenuItem("&Test Map in UZDoom", null, (_, _) => TestMap(), Keys.F5));
+        build.DropDownItems.Add(new ToolStripMenuItem("Build Texture &PK3...", null, (_, _) => BuildTexturePk3()));
 
         menu.Items.Add(file);
         menu.Items.Add(edit);
         menu.Items.Add(view);
+        menu.Items.Add(assets);
         menu.Items.Add(build);
         return menu;
     }
@@ -156,6 +184,10 @@ public sealed class MainForm : Form
         toolbar.Items.Add(_gridCombo);
 
         toolbar.Items.Add(new ToolStripSeparator());
+        var importTexture = new ToolStripButton("Import Texture") { ToolTipText = "Import PNG into the selected texture category" };
+        importTexture.Click += (_, _) => _assetBrowser.ImportCurrentCategory();
+        toolbar.Items.Add(importTexture);
+
         var reset3D = new ToolStripButton("Fit 3D");
         reset3D.Click += (_, _) => _preview.ResetView();
         toolbar.Items.Add(reset3D);
@@ -190,7 +222,7 @@ public sealed class MainForm : Form
             EditorTool.Vertex => "Vertex: drag corners. Double-click an edge to insert a new vertex. Delete removes a selected vertex when possible.",
             EditorTool.Edge => "Edge: click an edge and drag both of its vertices together.",
             EditorTool.Room => "Room: drag a rectangle. It becomes a real editable polygon sector.",
-            EditorTool.Door => "Door: drag a connector across the gap between two sector edges.",
+            EditorTool.Door => "Door: click a highlighted shared wall between two touching sectors to cut in a thin door.",
             EditorTool.PlayerStart => "Player Start: click inside a sector to place the player.",
             _ => "Ready"
         };
@@ -204,10 +236,45 @@ public sealed class MainForm : Form
         _canvas.Focus();
     }
 
+    private void CreateGameProject()
+    {
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = "Select or create the folder that will contain the game project.",
+            UseDescriptionForTitle = true,
+            ShowNewFolderButton = true
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        try
+        {
+            var root = Path.GetFullPath(dialog.SelectedPath);
+            var name = Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (string.IsNullOrWhiteSpace(name)) name = "UZDoomGame";
+
+            TextureAssetLibrary.WriteDescriptor(root, name);
+            _projectRoot = root;
+            _projectPath = Path.Combine(root, "Maps", "MAP01.uzmap");
+
+            var project = new EditorProject { Name = name, MapName = "MAP01" };
+            ApplyProject(project, resetHistory: true, resetViews: true);
+            WriteProject(_projectPath);
+            ConfigureProjectAssets();
+            SetTool(EditorTool.Select);
+            _status.Text = $"Created game project: {root}";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Could not create game project", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
     private void NewProject()
     {
         _projectPath = null;
+        _projectRoot = null;
         ApplyProject(new EditorProject(), resetHistory: true, resetViews: true);
+        ConfigureProjectAssets();
         SetTool(EditorTool.Select);
     }
 
@@ -215,6 +282,7 @@ public sealed class MainForm : Form
     {
         project.Normalize();
         _project = project;
+        _selectedObject = null;
         _canvas.Project = _project;
         _preview.Project = _project;
         _properties.SelectedObject = null;
@@ -273,18 +341,55 @@ public sealed class MainForm : Form
     {
         using var dialog = new OpenFileDialog
         {
-            Filter = "UZDoom Map Editor Project (*.uzmap)|*.uzmap|JSON (*.json)|*.json|All files (*.*)|*.*",
-            Title = "Open project"
+            Filter = "UZDoom Game Project (*.uzgame)|*.uzgame|UZDoom Map (*.uzmap)|*.uzmap|JSON (*.json)|*.json|All files (*.*)|*.*",
+            Title = "Open game project or map"
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
         try
         {
-            var json = File.ReadAllText(dialog.FileName);
-            var project = JsonSerializer.Deserialize<EditorProject>(json) ?? throw new InvalidDataException("Project file was empty.");
-            _projectPath = dialog.FileName;
-            ApplyProject(project, resetHistory: true, resetViews: true);
-            _status.Text = $"Opened {Path.GetFileName(dialog.FileName)}";
+            EditorProject project;
+            if (string.Equals(Path.GetExtension(dialog.FileName), ".uzgame", StringComparison.OrdinalIgnoreCase))
+            {
+                _projectRoot = Path.GetDirectoryName(Path.GetFullPath(dialog.FileName));
+                if (string.IsNullOrWhiteSpace(_projectRoot)) throw new InvalidDataException("Game project path is invalid.");
+
+                TextureAssetLibrary.EnsureStructure(_projectRoot);
+                var descriptor = JsonSerializer.Deserialize<GameProjectDescriptor>(File.ReadAllText(dialog.FileName));
+                var mapsDirectory = Path.Combine(_projectRoot, "Maps");
+                _projectPath = Directory.EnumerateFiles(mapsDirectory, "*.uzmap", SearchOption.TopDirectoryOnly)
+                    .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+                    .FirstOrDefault();
+
+                if (_projectPath is null)
+                {
+                    _projectPath = Path.Combine(mapsDirectory, "MAP01.uzmap");
+                    project = new EditorProject
+                    {
+                        Name = descriptor?.Name ?? Path.GetFileName(_projectRoot),
+                        MapName = "MAP01"
+                    };
+                    ApplyProject(project, resetHistory: true, resetViews: true);
+                    WriteProject(_projectPath);
+                }
+                else
+                {
+                    project = JsonSerializer.Deserialize<EditorProject>(File.ReadAllText(_projectPath))
+                        ?? throw new InvalidDataException("Map file was empty.");
+                    ApplyProject(project, resetHistory: true, resetViews: true);
+                }
+            }
+            else
+            {
+                project = JsonSerializer.Deserialize<EditorProject>(File.ReadAllText(dialog.FileName))
+                    ?? throw new InvalidDataException("Project file was empty.");
+                _projectPath = dialog.FileName;
+                _projectRoot = TextureAssetLibrary.GetProjectRoot(_projectPath);
+                ApplyProject(project, resetHistory: true, resetViews: true);
+            }
+
+            ConfigureProjectAssets();
+            _status.Text = $"Opened {Path.GetFileName(_projectPath)}";
         }
         catch (Exception ex)
         {
@@ -309,22 +414,148 @@ public sealed class MainForm : Form
             Filter = "UZDoom Map Editor Project (*.uzmap)|*.uzmap|JSON (*.json)|*.json",
             DefaultExt = "uzmap",
             AddExtension = true,
-            FileName = string.IsNullOrWhiteSpace(_project.Name) ? "Untitled.uzmap" : $"{_project.Name}.uzmap"
+            FileName = string.IsNullOrWhiteSpace(_project.Name) ? "Untitled.uzmap" : $"{_project.MapName}.uzmap"
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
         _projectPath = dialog.FileName;
+        _projectRoot = TextureAssetLibrary.GetProjectRoot(_projectPath);
         if (_project.Name == "Untitled") _project.Name = Path.GetFileNameWithoutExtension(dialog.FileName);
         WriteProject(dialog.FileName);
+        ConfigureProjectAssets();
     }
 
     private void WriteProject(string path)
     {
         _project.Normalize();
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         var json = JsonSerializer.Serialize(_project, new JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(path, json);
         _status.Text = $"Saved {Path.GetFileName(path)}";
         UpdateTitle();
+    }
+
+    private void ConfigureProjectAssets()
+    {
+        if (string.IsNullOrWhiteSpace(_projectPath))
+        {
+            _projectRoot = null;
+            _assetBrowser.SetProjectRoot(null);
+            return;
+        }
+
+        _projectRoot ??= TextureAssetLibrary.GetProjectRoot(_projectPath);
+        TextureAssetLibrary.EnsureStructure(_projectRoot);
+        _assetBrowser.SetProjectRoot(_projectRoot);
+    }
+
+    private void ApplyTextureAsset(TextureAsset asset)
+    {
+        var sector = _selectedObject switch
+        {
+            Sector direct => direct,
+            VertexSelection vertex => vertex.Sector,
+            EdgeSelection edge => edge.Sector,
+            _ => null
+        };
+
+        var applied = false;
+        if (sector is not null)
+        {
+            switch (asset.Category)
+            {
+                case TextureCategory.Walls:
+                    sector.WallTexture = asset.Name;
+                    applied = true;
+                    break;
+                case TextureCategory.Floors:
+                    sector.FloorTexture = asset.Name;
+                    applied = true;
+                    break;
+                case TextureCategory.Ceilings:
+                    sector.CeilingTexture = asset.Name;
+                    applied = true;
+                    break;
+                case TextureCategory.Doors:
+                    break;
+            }
+        }
+        else if (_selectedObject is Door door)
+        {
+            switch (asset.Category)
+            {
+                case TextureCategory.Walls:
+                    door.SideTexture = asset.Name;
+                    applied = true;
+                    break;
+                case TextureCategory.Floors:
+                    door.FloorTexture = asset.Name;
+                    applied = true;
+                    break;
+                case TextureCategory.Ceilings:
+                    door.CeilingTexture = asset.Name;
+                    applied = true;
+                    break;
+                case TextureCategory.Doors:
+                    door.DoorTexture = asset.Name;
+                    applied = true;
+                    break;
+            }
+        }
+
+        if (!applied)
+        {
+            var target = asset.Category == TextureCategory.Doors ? "a door" : "a sector or door";
+            MessageBox.Show(this, $"Select {target} in the 2D editor, then apply the texture.", "Nothing compatible selected", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        CommitEdit();
+        RefreshViews();
+        _status.Text = $"Applied {asset.Name} ({asset.Category})";
+    }
+
+    private void OpenAssetFolder()
+    {
+        if (string.IsNullOrWhiteSpace(_projectRoot))
+        {
+            MessageBox.Show(this, "Save the map or create a game project first.", "Project required", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        TextureAssetLibrary.EnsureStructure(_projectRoot);
+        var path = Path.Combine(_projectRoot, "Assets");
+        Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
+    }
+
+    private void BuildTexturePk3()
+    {
+        if (string.IsNullOrWhiteSpace(_projectRoot))
+        {
+            MessageBox.Show(this, "Save the map or create a game project first.", "Project required", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var defaultName = string.IsNullOrWhiteSpace(_project.Name) ? "game-assets.pk3" : $"{_project.Name}-assets.pk3";
+        using var dialog = new SaveFileDialog
+        {
+            Filter = "UZDoom PK3 (*.pk3)|*.pk3",
+            DefaultExt = "pk3",
+            AddExtension = true,
+            InitialDirectory = Path.Combine(_projectRoot, "Build"),
+            FileName = defaultName
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        try
+        {
+            var count = Pk3Builder.BuildTexturePk3(_projectRoot, dialog.FileName);
+            _status.Text = $"Built {Path.GetFileName(dialog.FileName)} with {count} custom texture(s)";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "PK3 build failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private void ExportUdmf()
@@ -372,6 +603,18 @@ public sealed class MainForm : Form
             var wadPath = Path.Combine(testDir, "editor-test.wad");
             WadWriter.WritePwad(wadPath, _project.MapName, text);
 
+            string? pk3Path = null;
+            var textureCount = 0;
+            if (!string.IsNullOrWhiteSpace(_projectRoot))
+            {
+                textureCount = TextureAssetLibrary.Scan(_projectRoot).Count;
+                if (textureCount > 0)
+                {
+                    pk3Path = Path.Combine(testDir, "editor-assets.pk3");
+                    Pk3Builder.BuildTexturePk3(_projectRoot, pk3Path);
+                }
+            }
+
             var startInfo = new ProcessStartInfo
             {
                 FileName = _uzDoomPath!,
@@ -382,11 +625,15 @@ public sealed class MainForm : Form
             startInfo.ArgumentList.Add(_iwadPath!);
             startInfo.ArgumentList.Add("-file");
             startInfo.ArgumentList.Add(wadPath);
+            if (pk3Path is not null)
+                startInfo.ArgumentList.Add(pk3Path);
             startInfo.ArgumentList.Add("+map");
             startInfo.ArgumentList.Add(_project.MapName);
 
             Process.Start(startInfo);
-            _status.Text = $"Testing {_project.MapName} in UZDoom";
+            _status.Text = textureCount > 0
+                ? $"Testing {_project.MapName} in UZDoom with {textureCount} custom texture(s)"
+                : $"Testing {_project.MapName} in UZDoom";
         }
         catch (Exception ex)
         {
@@ -414,7 +661,7 @@ public sealed class MainForm : Form
             {
                 MessageBox.Show(
                     this,
-                    $"{door.Name} is not touching two sector edges. Leave a gap between two rooms and place the door so opposite sides touch the sector boundaries.",
+                    $"{door.Name} is no longer connected to two sector boundaries. Move or recreate the door on a shared wall.",
                     "Door is not connected",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
@@ -517,6 +764,7 @@ public sealed class MainForm : Form
     private void UpdateTitle()
     {
         var name = string.IsNullOrWhiteSpace(_project.Name) ? "Untitled" : _project.Name;
-        Text = $"UZDoom Map Editor - {name}";
+        var map = string.IsNullOrWhiteSpace(_project.MapName) ? "MAP01" : _project.MapName;
+        Text = $"UZDoom Map Editor - {name} / {map}";
     }
 }
