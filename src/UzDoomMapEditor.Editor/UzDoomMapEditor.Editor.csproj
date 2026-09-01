@@ -12,6 +12,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="MapCanvas.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\UzDoomMapEditor.Core\UzDoomMapEditor.Core.csproj" />
   </ItemGroup>
 </Project>
