@@ -19,32 +19,17 @@ internal static class DarkTheme
         form.BackColor = Window;
         form.ForeColor = Text;
 
-        var menu = FindControl<MenuStrip>(form);
-        var status = FindControl<StatusStrip>(form);
-        var properties = FindControl<PropertyGrid>(form);
-        var toolbar = FindControls<ToolStrip>(form)
-            .FirstOrDefault(strip => strip is not MenuStrip && strip is not StatusStrip);
-
+        // Style every ToolStrip we can find. PropertyGrid owns an internal
+        // ToolStrip as well, so picking the first non-menu strip can accidentally
+        // theme that one and leave the actual editor action bar bright white.
         var renderer = new ToolStripProfessionalRenderer(new DarkColorTable());
-
-        if (menu is not null)
+        foreach (var strip in FindControls<ToolStrip>(form))
         {
-            menu.Renderer = renderer;
-            StyleToolStrip(menu);
+            strip.Renderer = renderer;
+            StyleToolStrip(strip);
         }
 
-        if (toolbar is not null)
-        {
-            toolbar.Renderer = renderer;
-            StyleToolStrip(toolbar);
-        }
-
-        if (status is not null)
-        {
-            status.Renderer = renderer;
-            StyleToolStrip(status);
-        }
-
+        var properties = FindControl<PropertyGrid>(form);
         if (properties is not null)
             StylePropertyGrid(properties);
 
@@ -101,7 +86,7 @@ internal static class DarkTheme
                     break;
 
                 // MenuStrip and StatusStrip both derive from ToolStrip, so this
-                // single case covers all three without unreachable patterns.
+                // single case covers all tool strips without unreachable patterns.
                 case ToolStrip:
                     break;
 
