@@ -100,9 +100,9 @@ internal static class DarkTheme
                     split.Panel2.BackColor = Panel;
                     break;
 
-                case MenuStrip:
+                // MenuStrip and StatusStrip both derive from ToolStrip, so this
+                // single case covers all three without unreachable patterns.
                 case ToolStrip:
-                case StatusStrip:
                     break;
 
                 case TextBoxBase textBox:
