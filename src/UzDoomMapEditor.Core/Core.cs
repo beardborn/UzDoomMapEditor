@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Globalization;
 using System.Text;
+using System.Text.Json.Serialization;
 
 namespace UzDoomMapEditor.Core;
 
@@ -8,15 +9,52 @@ public sealed class EditorProject
 {
     public string Name { get; set; } = "Untitled";
     public string MapName { get; set; } = "MAP01";
-    public List<Room> Rooms { get; set; } = new();
+
+    public List<Sector> Sectors { get; set; } = new();
     public List<Door> Doors { get; set; } = new();
     public List<MapThing> Things { get; set; } = new();
+
+    // Kept only so projects created by the first proof-of-concept still open.
+    [Browsable(false)]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<Room>? Rooms { get; set; }
+
+    public void Normalize()
+    {
+        Sectors ??= new List<Sector>();
+        Doors ??= new List<Door>();
+        Things ??= new List<MapThing>();
+
+        if (Rooms is { Count: > 0 })
+        {
+            foreach (var room in Rooms)
+                Sectors.Add(room.ToSector());
+        }
+
+        Rooms = null;
+
+        foreach (var sector in Sectors)
+        {
+            sector.Vertices ??= new List<MapVertex>();
+            sector.Name ??= "Sector";
+            sector.WallTexture ??= "STARTAN3";
+            sector.FloorTexture ??= "FLOOR0_1";
+            sector.CeilingTexture ??= "CEIL1_1";
+        }
+    }
 }
 
-public sealed class Room
+public sealed class MapVertex
 {
-    [Category("Identity")]
-    public string Name { get; set; } = "Room";
+    public MapVertex()
+    {
+    }
+
+    public MapVertex(int x, int y)
+    {
+        X = x;
+        Y = y;
+    }
 
     [Category("Position")]
     public int X { get; set; }
@@ -24,11 +62,16 @@ public sealed class Room
     [Category("Position")]
     public int Y { get; set; }
 
-    [Category("Size")]
-    public int Width { get; set; } = 256;
+    public override string ToString() => $"({X}, {Y})";
+}
 
-    [Category("Size")]
-    public int Depth { get; set; } = 256;
+public sealed class Sector
+{
+    [Category("Identity")]
+    public string Name { get; set; } = "Sector";
+
+    [Browsable(false)]
+    public List<MapVertex> Vertices { get; set; } = new();
 
     [Category("Heights")]
     public int FloorHeight { get; set; }
@@ -49,7 +92,56 @@ public sealed class Room
     [DefaultValue(160)]
     public int LightLevel { get; set; } = 160;
 
+    [Category("Geometry")]
+    [ReadOnly(true)]
+    public int VertexCount => Vertices?.Count ?? 0;
+
+    public static Sector Rectangle(string name, int x, int y, int width, int depth)
+    {
+        var x2 = x + Math.Max(1, width);
+        var y2 = y + Math.Max(1, depth);
+        return new Sector
+        {
+            Name = name,
+            Vertices = new List<MapVertex>
+            {
+                new(x, y),
+                new(x, y2),
+                new(x2, y2),
+                new(x2, y)
+            }
+        };
+    }
+
     public override string ToString() => Name;
+}
+
+// Legacy rectangle room from Milestone 0. It is migrated to Sector on load.
+public sealed class Room
+{
+    public string Name { get; set; } = "Room";
+    public int X { get; set; }
+    public int Y { get; set; }
+    public int Width { get; set; } = 256;
+    public int Depth { get; set; } = 256;
+    public int FloorHeight { get; set; }
+    public int CeilingHeight { get; set; } = 128;
+    public string WallTexture { get; set; } = "STARTAN3";
+    public string FloorTexture { get; set; } = "FLOOR0_1";
+    public string CeilingTexture { get; set; } = "CEIL1_1";
+    public int LightLevel { get; set; } = 160;
+
+    public Sector ToSector()
+    {
+        var sector = Sector.Rectangle(Name, X, Y, Width, Depth);
+        sector.FloorHeight = FloorHeight;
+        sector.CeilingHeight = CeilingHeight;
+        sector.WallTexture = WallTexture;
+        sector.FloorTexture = FloorTexture;
+        sector.CeilingTexture = CeilingTexture;
+        sector.LightLevel = LightLevel;
+        return sector;
+    }
 }
 
 public sealed class Door
@@ -64,23 +156,20 @@ public sealed class Door
     public int Y { get; set; }
 
     [Category("Size")]
-    [Description("Door connector width in map units. It should touch a room on two opposite sides.")]
+    [Description("Door connector width in map units. It should touch a sector on two opposite sides.")]
     public int Width { get; set; } = 64;
 
     [Category("Size")]
-    [Description("Door connector depth in map units. It should touch a room on two opposite sides.")]
+    [Description("Door connector depth in map units. It should touch a sector on two opposite sides.")]
     public int Depth { get; set; } = 128;
 
     [Category("Heights")]
-    [Description("Usually the same floor height as the rooms on either side.")]
     public int FloorHeight { get; set; }
 
     [Category("Door")]
-    [Description("Unique UZDoom sector tag used by the door action.")]
     public int Tag { get; set; } = 100;
 
     [Category("Door")]
-    [Description("Door_Raise speed. 16 is a good normal starting value.")]
     public int Speed { get; set; } = 16;
 
     [Category("Door")]
@@ -88,7 +177,6 @@ public sealed class Door
     public int DelayTics { get; set; } = 150;
 
     [Category("Textures")]
-    [Description("Texture shown on the moving door face.")]
     public string DoorTexture { get; set; } = "BIGDOOR2";
 
     [Category("Textures")]
@@ -102,6 +190,14 @@ public sealed class Door
 
     [Category("Lighting")]
     public int LightLevel { get; set; } = 160;
+
+    public IReadOnlyList<MapVertex> GetVertices() => new[]
+    {
+        new MapVertex(X, Y),
+        new MapVertex(X, Y + Math.Max(1, Depth)),
+        new MapVertex(X + Math.Max(1, Width), Y + Math.Max(1, Depth)),
+        new MapVertex(X + Math.Max(1, Width), Y)
+    };
 
     public override string ToString() => Name;
 }
@@ -130,23 +226,89 @@ public sealed class MapThing
     public override string ToString() => Name;
 }
 
+public static class GeometryUtil
+{
+    public static bool PointInPolygon(double x, double y, IReadOnlyList<MapVertex> vertices, bool includeBoundary = true)
+    {
+        if (vertices.Count < 3) return false;
+
+        var inside = false;
+        for (var i = 0; i < vertices.Count; i++)
+        {
+            var a = vertices[i];
+            var b = vertices[(i + 1) % vertices.Count];
+
+            if (PointOnSegment(x, y, a.X, a.Y, b.X, b.Y))
+                return includeBoundary;
+
+            var intersects = ((a.Y > y) != (b.Y > y)) &&
+                             (x < (double)(b.X - a.X) * (y - a.Y) / (b.Y - a.Y) + a.X);
+            if (intersects) inside = !inside;
+        }
+
+        return inside;
+    }
+
+    public static bool PointOnSegment(double px, double py, double ax, double ay, double bx, double by)
+    {
+        var cross = (px - ax) * (by - ay) - (py - ay) * (bx - ax);
+        if (Math.Abs(cross) > 0.0001) return false;
+
+        var dot = (px - ax) * (bx - ax) + (py - ay) * (by - ay);
+        if (dot < -0.0001) return false;
+
+        var len2 = (bx - ax) * (bx - ax) + (by - ay) * (by - ay);
+        return dot <= len2 + 0.0001;
+    }
+
+    public static double DistancePointToSegment(double px, double py, double ax, double ay, double bx, double by)
+    {
+        var dx = bx - ax;
+        var dy = by - ay;
+        var len2 = dx * dx + dy * dy;
+        if (len2 <= double.Epsilon)
+            return Math.Sqrt((px - ax) * (px - ax) + (py - ay) * (py - ay));
+
+        var t = Math.Clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0.0, 1.0);
+        var qx = ax + t * dx;
+        var qy = ay + t * dy;
+        var ex = px - qx;
+        var ey = py - qy;
+        return Math.Sqrt(ex * ex + ey * ey);
+    }
+
+    public static double SignedArea(IReadOnlyList<MapVertex> vertices)
+    {
+        double area = 0;
+        for (var i = 0; i < vertices.Count; i++)
+        {
+            var a = vertices[i];
+            var b = vertices[(i + 1) % vertices.Count];
+            area += (double)a.X * b.Y - (double)b.X * a.Y;
+        }
+        return area / 2.0;
+    }
+}
+
 public static class UdmfExporter
 {
-    private sealed record SectorRect(
-        string Name,
-        int X1,
-        int Y1,
-        int X2,
-        int Y2,
-        int FloorHeight,
-        int CeilingHeight,
-        string WallTexture,
-        string FloorTexture,
-        string CeilingTexture,
-        int LightLevel,
-        Door? Door);
-
     private readonly record struct PointKey(int X, int Y);
+
+    private sealed class Region
+    {
+        public required string Name { get; init; }
+        public required List<PointKey> Vertices { get; init; }
+        public required int FloorHeight { get; init; }
+        public required int CeilingHeight { get; init; }
+        public required string WallTexture { get; init; }
+        public required string FloorTexture { get; init; }
+        public required string CeilingTexture { get; init; }
+        public required int LightLevel { get; init; }
+        public Door? Door { get; init; }
+    }
+
+    private sealed record RawEdge(int Sector, PointKey A, PointKey B);
+    private sealed record EdgeUse(int Sector, PointKey A, PointKey B);
 
     private readonly record struct EdgeKey(PointKey A, PointKey B)
     {
@@ -162,17 +324,9 @@ public static class UdmfExporter
         }
     }
 
-    private sealed class EdgeInfo
-    {
-        public EdgeKey Key { get; init; }
-        public List<int> Sectors { get; } = new();
-    }
-
     public static string BuildText(EditorProject project)
     {
-        project.Rooms ??= new List<Room>();
-        project.Doors ??= new List<Door>();
-        project.Things ??= new List<MapThing>();
+        project.Normalize();
 
         var regions = BuildRegions(project);
         ValidateRegions(regions);
@@ -186,62 +340,56 @@ public static class UdmfExporter
         vertices.AppendLine("namespace = \"zdoom\";");
         vertices.AppendLine();
 
-        for (var i = 0; i < regions.Count; i++)
-            AppendSector(sectors, regions[i]);
+        foreach (var region in regions)
+            AppendSector(sectors, region);
 
-        var xCuts = regions.SelectMany(r => new[] { r.X1, r.X2 }).Distinct().OrderBy(v => v).ToArray();
-        var yCuts = regions.SelectMany(r => new[] { r.Y1, r.Y2 }).Distinct().OrderBy(v => v).ToArray();
-        var edges = new Dictionary<EdgeKey, EdgeInfo>();
+        var rawEdges = new List<RawEdge>();
+        var allPoints = new HashSet<PointKey>();
 
         for (var sectorIndex = 0; sectorIndex < regions.Count; sectorIndex++)
         {
-            var r = regions[sectorIndex];
-            AddVerticalEdge(edges, r.X1, r.Y1, r.Y2, yCuts, sectorIndex);
-            AddVerticalEdge(edges, r.X2, r.Y1, r.Y2, yCuts, sectorIndex);
-            AddHorizontalEdge(edges, r.Y1, r.X1, r.X2, xCuts, sectorIndex);
-            AddHorizontalEdge(edges, r.Y2, r.X1, r.X2, xCuts, sectorIndex);
+            var region = regions[sectorIndex];
+            for (var i = 0; i < region.Vertices.Count; i++)
+            {
+                var a = region.Vertices[i];
+                var b = region.Vertices[(i + 1) % region.Vertices.Count];
+                rawEdges.Add(new RawEdge(sectorIndex, a, b));
+                allPoints.Add(a);
+                allPoints.Add(b);
+            }
         }
 
+        var edges = SplitAndGroupEdges(rawEdges, allPoints);
         var vertexIndices = new Dictionary<PointKey, int>();
         var sideIndex = 0;
 
-        foreach (var edge in edges.Values.OrderBy(e => e.Key.A.X).ThenBy(e => e.Key.A.Y).ThenBy(e => e.Key.B.X).ThenBy(e => e.Key.B.Y))
+        foreach (var pair in edges.OrderBy(e => e.Key.A.X).ThenBy(e => e.Key.A.Y).ThenBy(e => e.Key.B.X).ThenBy(e => e.Key.B.Y))
         {
-            if (edge.Sectors.Count == 0) continue;
-            if (edge.Sectors.Count > 2)
-                throw new InvalidOperationException("More than two sectors share the same boundary. Move overlapping rooms/doors apart.");
+            var uses = pair.Value;
+            if (uses.Count > 2)
+                throw new InvalidOperationException("More than two sectors share a boundary segment. Separate the overlapping geometry.");
 
-            var a = edge.Key.A;
-            var b = edge.Key.B;
-            var sectorA = edge.Sectors[0];
-            int? sectorB = edge.Sectors.Count == 2 ? edge.Sectors[1] : null;
+            var first = uses[0];
+            var v1 = GetVertexIndex(vertices, vertexIndices, first.A);
+            var v2 = GetVertexIndex(vertices, vertexIndices, first.B);
 
-            // Orient the line so sectorA lies on Doom's front/right side.
-            if (!IsSectorOnRight(a, b, regions[sectorA]))
-                (a, b) = (b, a);
-
-            if (sectorB is not null && IsSectorOnRight(a, b, regions[sectorB.Value]))
-                (sectorA, sectorB) = (sectorB.Value, sectorA);
-
-            var v1 = GetVertexIndex(vertices, vertexIndices, a);
-            var v2 = GetVertexIndex(vertices, vertexIndices, b);
-
-            if (sectorB is null)
+            if (uses.Count == 1)
             {
-                AppendSideDef(sidedefs, sectorA, regions[sectorA].WallTexture, "-", "-");
-                AppendOneSidedLine(linedefs, v1, v2, sideIndex);
-                sideIndex++;
+                AppendSideDef(sidedefs, first.Sector, regions[first.Sector].WallTexture, "-", "-");
+                AppendOneSidedLine(linedefs, v1, v2, sideIndex++);
                 continue;
             }
 
-            var front = regions[sectorA];
-            var back = regions[sectorB.Value];
+            var second = uses[1];
+            var front = regions[first.Sector];
+            var back = regions[second.Sector];
             var door = front.Door ?? back.Door;
-            var topTexture = door?.DoorTexture ?? "-";
 
-            AppendSideDef(sidedefs, sectorA, "-", topTexture, "-");
+            var frontTop = door?.DoorTexture ?? front.WallTexture;
+            var backTop = door?.DoorTexture ?? back.WallTexture;
+            AppendSideDef(sidedefs, first.Sector, "-", frontTop, front.WallTexture);
             var frontSide = sideIndex++;
-            AppendSideDef(sidedefs, sectorB.Value, "-", topTexture, "-");
+            AppendSideDef(sidedefs, second.Sector, "-", backTop, back.WallTexture);
             var backSide = sideIndex++;
 
             AppendTwoSidedLine(linedefs, v1, v2, frontSide, backSide, door);
@@ -253,106 +401,216 @@ public static class UdmfExporter
         return vertices.ToString() + sectors + sidedefs + linedefs + things;
     }
 
-    private static List<SectorRect> BuildRegions(EditorProject project)
+    private static List<Region> BuildRegions(EditorProject project)
     {
-        var regions = new List<SectorRect>();
+        var regions = new List<Region>();
 
-        foreach (var room in project.Rooms)
+        foreach (var sector in project.Sectors)
         {
-            regions.Add(new SectorRect(
-                room.Name,
-                room.X,
-                room.Y,
-                room.X + Math.Max(1, room.Width),
-                room.Y + Math.Max(1, room.Depth),
-                room.FloorHeight,
-                Math.Max(room.FloorHeight + 1, room.CeilingHeight),
-                room.WallTexture,
-                room.FloorTexture,
-                room.CeilingTexture,
-                Math.Clamp(room.LightLevel, 0, 255),
-                null));
+            if (sector.Vertices.Count < 3)
+                throw new InvalidOperationException($"{sector.Name} needs at least three vertices.");
+
+            var points = sector.Vertices.Select(v => new PointKey(v.X, v.Y)).ToList();
+            NormalizeClockwise(points);
+
+            regions.Add(new Region
+            {
+                Name = sector.Name,
+                Vertices = points,
+                FloorHeight = sector.FloorHeight,
+                CeilingHeight = Math.Max(sector.FloorHeight + 1, sector.CeilingHeight),
+                WallTexture = sector.WallTexture,
+                FloorTexture = sector.FloorTexture,
+                CeilingTexture = sector.CeilingTexture,
+                LightLevel = Math.Clamp(sector.LightLevel, 0, 255)
+            });
         }
 
         foreach (var door in project.Doors)
         {
-            // A classic Doom door is a sector whose ceiling starts at the floor.
-            // Door_Raise lifts it to the neighboring ceiling when the player uses it.
-            regions.Add(new SectorRect(
-                door.Name,
-                door.X,
-                door.Y,
-                door.X + Math.Max(1, door.Width),
-                door.Y + Math.Max(1, door.Depth),
-                door.FloorHeight,
-                door.FloorHeight,
-                door.SideTexture,
-                door.FloorTexture,
-                door.CeilingTexture,
-                Math.Clamp(door.LightLevel, 0, 255),
-                door));
+            var points = door.GetVertices().Select(v => new PointKey(v.X, v.Y)).ToList();
+            NormalizeClockwise(points);
+            regions.Add(new Region
+            {
+                Name = door.Name,
+                Vertices = points,
+                FloorHeight = door.FloorHeight,
+                CeilingHeight = door.FloorHeight,
+                WallTexture = door.SideTexture,
+                FloorTexture = door.FloorTexture,
+                CeilingTexture = door.CeilingTexture,
+                LightLevel = Math.Clamp(door.LightLevel, 0, 255),
+                Door = door
+            });
         }
 
         return regions;
     }
 
-    private static void ValidateRegions(IReadOnlyList<SectorRect> regions)
+    private static void NormalizeClockwise(List<PointKey> points)
+    {
+        double area = 0;
+        for (var i = 0; i < points.Count; i++)
+        {
+            var a = points[i];
+            var b = points[(i + 1) % points.Count];
+            area += (double)a.X * b.Y - (double)b.X * a.Y;
+        }
+
+        if (area > 0)
+            points.Reverse();
+    }
+
+    private static Dictionary<EdgeKey, List<EdgeUse>> SplitAndGroupEdges(IReadOnlyList<RawEdge> rawEdges, IReadOnlyCollection<PointKey> allPoints)
+    {
+        var grouped = new Dictionary<EdgeKey, List<EdgeUse>>();
+
+        foreach (var raw in rawEdges)
+        {
+            var points = allPoints.Where(p => PointOnSegment(p, raw.A, raw.B)).ToList();
+            points.Sort((p1, p2) => ParameterAlong(raw.A, raw.B, p1).CompareTo(ParameterAlong(raw.A, raw.B, p2)));
+
+            for (var i = 0; i < points.Count - 1; i++)
+            {
+                var a = points[i];
+                var b = points[i + 1];
+                if (a == b) continue;
+
+                var key = EdgeKey.Create(a, b);
+                if (!grouped.TryGetValue(key, out var uses))
+                {
+                    uses = new List<EdgeUse>();
+                    grouped.Add(key, uses);
+                }
+
+                if (uses.All(u => u.Sector != raw.Sector))
+                    uses.Add(new EdgeUse(raw.Sector, a, b));
+            }
+        }
+
+        return grouped;
+    }
+
+    private static bool PointOnSegment(PointKey p, PointKey a, PointKey b)
+    {
+        var cross = (long)(p.X - a.X) * (b.Y - a.Y) - (long)(p.Y - a.Y) * (b.X - a.X);
+        if (cross != 0) return false;
+        return p.X >= Math.Min(a.X, b.X) && p.X <= Math.Max(a.X, b.X) &&
+               p.Y >= Math.Min(a.Y, b.Y) && p.Y <= Math.Max(a.Y, b.Y);
+    }
+
+    private static double ParameterAlong(PointKey a, PointKey b, PointKey p)
+    {
+        var dx = b.X - a.X;
+        var dy = b.Y - a.Y;
+        var len2 = (double)dx * dx + (double)dy * dy;
+        return len2 <= double.Epsilon ? 0 : ((p.X - a.X) * dx + (p.Y - a.Y) * dy) / len2;
+    }
+
+    private static void ValidateRegions(IReadOnlyList<Region> regions)
     {
         for (var i = 0; i < regions.Count; i++)
         {
             var a = regions[i];
-            if (a.X2 <= a.X1 || a.Y2 <= a.Y1)
-                throw new InvalidOperationException($"{a.Name} has an invalid size.");
+            if (Math.Abs(SignedArea(a.Vertices)) < 0.5)
+                throw new InvalidOperationException($"{a.Name} has zero or invalid area.");
+
+            if (HasSelfIntersection(a.Vertices))
+                throw new InvalidOperationException($"{a.Name} crosses over itself. Move its vertices so the outline does not self-intersect.");
 
             for (var j = i + 1; j < regions.Count; j++)
             {
                 var b = regions[j];
-                var overlapX = Math.Min(a.X2, b.X2) - Math.Max(a.X1, b.X1);
-                var overlapY = Math.Min(a.Y2, b.Y2) - Math.Max(a.Y1, b.Y1);
-                if (overlapX > 0 && overlapY > 0)
-                    throw new InvalidOperationException($"{a.Name} overlaps {b.Name}. Rooms and doors may touch edges but cannot overlap yet.");
+                if (PolygonsOverlap(a.Vertices, b.Vertices))
+                    throw new InvalidOperationException($"{a.Name} overlaps {b.Name}. Sectors may share edges but their interiors cannot overlap.");
             }
         }
     }
 
-    private static void AddVerticalEdge(Dictionary<EdgeKey, EdgeInfo> edges, int x, int y1, int y2, int[] cuts, int sectorIndex)
+    private static bool PolygonsOverlap(IReadOnlyList<PointKey> a, IReadOnlyList<PointKey> b)
     {
-        var points = cuts.Where(v => v >= y1 && v <= y2).Prepend(y1).Append(y2).Distinct().OrderBy(v => v).ToArray();
-        for (var i = 0; i < points.Length - 1; i++)
-            AddEdge(edges, new PointKey(x, points[i]), new PointKey(x, points[i + 1]), sectorIndex);
-    }
+        foreach (var p in a)
+            if (PointInPolygonStrict(p, b)) return true;
+        foreach (var p in b)
+            if (PointInPolygonStrict(p, a)) return true;
 
-    private static void AddHorizontalEdge(Dictionary<EdgeKey, EdgeInfo> edges, int y, int x1, int x2, int[] cuts, int sectorIndex)
-    {
-        var points = cuts.Where(v => v >= x1 && v <= x2).Prepend(x1).Append(x2).Distinct().OrderBy(v => v).ToArray();
-        for (var i = 0; i < points.Length - 1; i++)
-            AddEdge(edges, new PointKey(points[i], y), new PointKey(points[i + 1], y), sectorIndex);
-    }
-
-    private static void AddEdge(Dictionary<EdgeKey, EdgeInfo> edges, PointKey a, PointKey b, int sectorIndex)
-    {
-        if (a == b) return;
-        var key = EdgeKey.Create(a, b);
-        if (!edges.TryGetValue(key, out var info))
+        for (var i = 0; i < a.Count; i++)
         {
-            info = new EdgeInfo { Key = key };
-            edges.Add(key, info);
+            var a1 = a[i];
+            var a2 = a[(i + 1) % a.Count];
+            for (var j = 0; j < b.Count; j++)
+            {
+                var b1 = b[j];
+                var b2 = b[(j + 1) % b.Count];
+                if (ProperSegmentIntersection(a1, a2, b1, b2)) return true;
+            }
         }
 
-        if (!info.Sectors.Contains(sectorIndex))
-            info.Sectors.Add(sectorIndex);
+        return false;
     }
 
-    private static bool IsSectorOnRight(PointKey a, PointKey b, SectorRect sector)
+    private static bool HasSelfIntersection(IReadOnlyList<PointKey> p)
     {
-        var midX = (a.X + b.X) / 2.0;
-        var midY = (a.Y + b.Y) / 2.0;
-        var centerX = (sector.X1 + sector.X2) / 2.0;
-        var centerY = (sector.Y1 + sector.Y2) / 2.0;
-        var dx = b.X - a.X;
-        var dy = b.Y - a.Y;
-        var cross = dx * (centerY - midY) - dy * (centerX - midX);
-        return cross < 0;
+        for (var i = 0; i < p.Count; i++)
+        {
+            var a1 = p[i];
+            var a2 = p[(i + 1) % p.Count];
+            for (var j = i + 1; j < p.Count; j++)
+            {
+                if (j == i || (j + 1) % p.Count == i || (i + 1) % p.Count == j) continue;
+                var b1 = p[j];
+                var b2 = p[(j + 1) % p.Count];
+                if (ProperSegmentIntersection(a1, a2, b1, b2)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool ProperSegmentIntersection(PointKey a, PointKey b, PointKey c, PointKey d)
+    {
+        var o1 = Orientation(a, b, c);
+        var o2 = Orientation(a, b, d);
+        var o3 = Orientation(c, d, a);
+        var o4 = Orientation(c, d, b);
+
+        // Collinear/shared boundaries are valid. We only reject a real crossing.
+        if (o1 == 0 || o2 == 0 || o3 == 0 || o4 == 0) return false;
+        return o1 != o2 && o3 != o4;
+    }
+
+    private static int Orientation(PointKey a, PointKey b, PointKey c)
+    {
+        var value = (long)(b.X - a.X) * (c.Y - a.Y) - (long)(b.Y - a.Y) * (c.X - a.X);
+        return value == 0 ? 0 : value > 0 ? 1 : -1;
+    }
+
+    private static bool PointInPolygonStrict(PointKey p, IReadOnlyList<PointKey> polygon)
+    {
+        for (var i = 0; i < polygon.Count; i++)
+            if (PointOnSegment(p, polygon[i], polygon[(i + 1) % polygon.Count])) return false;
+
+        var inside = false;
+        for (var i = 0; i < polygon.Count; i++)
+        {
+            var a = polygon[i];
+            var b = polygon[(i + 1) % polygon.Count];
+            var intersects = ((a.Y > p.Y) != (b.Y > p.Y)) &&
+                             (p.X < (double)(b.X - a.X) * (p.Y - a.Y) / (b.Y - a.Y) + a.X);
+            if (intersects) inside = !inside;
+        }
+        return inside;
+    }
+
+    private static double SignedArea(IReadOnlyList<PointKey> points)
+    {
+        double area = 0;
+        for (var i = 0; i < points.Count; i++)
+        {
+            var a = points[i];
+            var b = points[(i + 1) % points.Count];
+            area += (double)a.X * b.Y - (double)b.X * a.Y;
+        }
+        return area / 2.0;
     }
 
     private static int GetVertexIndex(StringBuilder vertices, Dictionary<PointKey, int> indices, PointKey point)
@@ -364,7 +622,7 @@ public static class UdmfExporter
         return index;
     }
 
-    private static void AppendSector(StringBuilder sb, SectorRect region)
+    private static void AppendSector(StringBuilder sb, Region region)
     {
         sb.AppendLine("sector");
         sb.AppendLine("{");
@@ -425,7 +683,6 @@ public static class UdmfExporter
 
         if (door is not null)
         {
-            // ZDoom/Hexen-format special 12 = Door_Raise(tag, speed, delay).
             sb.AppendLine("    special = 12;");
             sb.AppendLine($"    arg0 = {Math.Max(1, door.Tag)};");
             sb.AppendLine($"    arg1 = {Math.Clamp(door.Speed, 1, 255)};");
@@ -460,7 +717,7 @@ public static class UdmfExporter
     }
 
     private static string F(int value) => value.ToString("0.0", CultureInfo.InvariantCulture);
-    private static string Quote(string value) => $"\"{(value ?? string.Empty).Replace("\\", "\\\\").Replace("\"", "\\\"")}\"";
+    private static string Quote(string? value) => $"\"{(value ?? string.Empty).Replace("\\", "\\\\").Replace("\"", "\\\"")}\"";
 }
 
 public static class WadWriter
