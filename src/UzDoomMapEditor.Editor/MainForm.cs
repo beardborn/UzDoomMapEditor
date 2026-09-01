@@ -9,6 +9,7 @@ internal enum EditorTool
 {
     Select,
     Room,
+    Door,
     PlayerStart
 }
 
@@ -54,7 +55,7 @@ public sealed class MainForm : Form
 
         _canvas.Dock = DockStyle.Fill;
         _canvas.SelectionChanged += selected => _properties.SelectedObject = selected;
-        _canvas.ProjectChanged += () => UpdateTitle();
+        _canvas.ProjectChanged += UpdateTitle;
         _properties.PropertyValueChanged += (_, _) =>
         {
             _canvas.Invalidate();
@@ -99,16 +100,19 @@ public sealed class MainForm : Form
 
         var select = new ToolStripButton("Select") { CheckOnClick = true, Tag = EditorTool.Select };
         var room = new ToolStripButton("Room") { CheckOnClick = true, Tag = EditorTool.Room };
+        var door = new ToolStripButton("Door") { CheckOnClick = true, Tag = EditorTool.Door };
         var player = new ToolStripButton("Player Start") { CheckOnClick = true, Tag = EditorTool.PlayerStart };
         var test = new ToolStripButton("▶ Test (F5)");
 
         select.Click += ToolButtonClicked;
         room.Click += ToolButtonClicked;
+        door.Click += ToolButtonClicked;
         player.Click += ToolButtonClicked;
         test.Click += (_, _) => TestMap();
 
         toolbar.Items.Add(select);
         toolbar.Items.Add(room);
+        toolbar.Items.Add(door);
         toolbar.Items.Add(player);
         toolbar.Items.Add(new ToolStripSeparator());
         toolbar.Items.Add(test);
@@ -129,6 +133,7 @@ public sealed class MainForm : Form
         {
             EditorTool.Select => "Select: click an object; drag to move. Middle mouse pans. Wheel zooms.",
             EditorTool.Room => "Room: drag a rectangle on the grid.",
+            EditorTool.Door => "Door: drag a rectangular connector across the gap between two room edges.",
             EditorTool.PlayerStart => "Player Start: click to place the player start.",
             _ => "Ready"
         };
@@ -156,6 +161,7 @@ public sealed class MainForm : Form
     private void SetProject(EditorProject project)
     {
         project.Rooms ??= new List<Room>();
+        project.Doors ??= new List<Door>();
         project.Things ??= new List<MapThing>();
         _project = project;
         _canvas.Project = _project;
@@ -223,6 +229,8 @@ public sealed class MainForm : Form
 
     private void ExportUdmf()
     {
+        if (!TryBuildUdmf(out var text)) return;
+
         using var dialog = new SaveFileDialog
         {
             Filter = "UDMF TEXTMAP (*.txt)|*.txt|All files (*.*)|*.*",
@@ -230,13 +238,14 @@ public sealed class MainForm : Form
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        File.WriteAllText(dialog.FileName, UdmfExporter.BuildText(_project));
+        File.WriteAllText(dialog.FileName, text);
         _status.Text = $"Exported UDMF: {dialog.FileName}";
     }
 
     private void ExportWad()
     {
         if (!ValidateForTest()) return;
+        if (!TryBuildUdmf(out var text)) return;
 
         using var dialog = new SaveFileDialog
         {
@@ -245,13 +254,14 @@ public sealed class MainForm : Form
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        WadWriter.WritePwad(dialog.FileName, _project.MapName, UdmfExporter.BuildText(_project));
+        WadWriter.WritePwad(dialog.FileName, _project.MapName, text);
         _status.Text = $"Exported WAD: {dialog.FileName}";
     }
 
     private void TestMap()
     {
         if (!ValidateForTest()) return;
+        if (!TryBuildUdmf(out var text)) return;
         if (!ChooseUzDoom()) return;
         if (!ChooseIwad()) return;
 
@@ -260,7 +270,7 @@ public sealed class MainForm : Form
             var testDir = Path.Combine(Path.GetTempPath(), "UzDoomMapEditor");
             Directory.CreateDirectory(testDir);
             var wadPath = Path.Combine(testDir, "editor-test.wad");
-            WadWriter.WritePwad(wadPath, _project.MapName, UdmfExporter.BuildText(_project));
+            WadWriter.WritePwad(wadPath, _project.MapName, text);
 
             var startInfo = new ProcessStartInfo
             {
@@ -298,7 +308,57 @@ public sealed class MainForm : Form
             return false;
         }
 
+        foreach (var door in _project.Doors)
+        {
+            if (CountTouchingRooms(door) < 2)
+            {
+                MessageBox.Show(
+                    this,
+                    $"{door.Name} is not connected to two room edges yet.\n\nFor now, leave a gap between two rooms and drag the Door rectangle so it touches both rooms.",
+                    "Door is not connected",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return false;
+            }
+        }
+
         return true;
+    }
+
+    private int CountTouchingRooms(Door door)
+    {
+        var count = 0;
+        var doorX2 = door.X + door.Width;
+        var doorY2 = door.Y + door.Depth;
+
+        foreach (var room in _project.Rooms)
+        {
+            var roomX2 = room.X + room.Width;
+            var roomY2 = room.Y + room.Depth;
+            var overlapX = Math.Min(roomX2, doorX2) - Math.Max(room.X, door.X);
+            var overlapY = Math.Min(roomY2, doorY2) - Math.Max(room.Y, door.Y);
+
+            var sharesVerticalEdge = overlapY > 0 && (roomX2 == door.X || room.X == doorX2);
+            var sharesHorizontalEdge = overlapX > 0 && (roomY2 == door.Y || room.Y == doorY2);
+            if (sharesVerticalEdge || sharesHorizontalEdge) count++;
+        }
+
+        return count;
+    }
+
+    private bool TryBuildUdmf(out string text)
+    {
+        try
+        {
+            text = UdmfExporter.BuildText(_project);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            text = string.Empty;
+            MessageBox.Show(this, ex.Message, "Map geometry problem", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
     }
 
     private bool ChooseUzDoom()
@@ -348,9 +408,10 @@ public sealed class MapCanvas : Control
     private PointF _origin;
     private bool _originInitialised;
 
-    private bool _drawingRoom;
-    private PointF _roomStart;
-    private PointF _roomCurrent;
+    private bool _drawingArea;
+    private EditorTool _drawingTool;
+    private PointF _areaStart;
+    private PointF _areaCurrent;
 
     private bool _panning;
     private Point _panMouseStart;
@@ -370,6 +431,9 @@ public sealed class MapCanvas : Control
         set
         {
             _project = value ?? new EditorProject();
+            _project.Rooms ??= new List<Room>();
+            _project.Doors ??= new List<Door>();
+            _project.Things ??= new List<MapThing>();
             _selected = null;
             Invalidate();
         }
@@ -419,11 +483,14 @@ public sealed class MapCanvas : Control
         foreach (var room in _project.Rooms)
             DrawRoom(e.Graphics, room, ReferenceEquals(room, _selected));
 
+        foreach (var door in _project.Doors)
+            DrawDoor(e.Graphics, door, ReferenceEquals(door, _selected));
+
         foreach (var thing in _project.Things)
             DrawThing(e.Graphics, thing, ReferenceEquals(thing, _selected));
 
-        if (_drawingRoom)
-            DrawDraftRoom(e.Graphics);
+        if (_drawingArea)
+            DrawDraftArea(e.Graphics);
     }
 
     private void DrawGrid(Graphics g)
@@ -469,6 +536,20 @@ public sealed class MapCanvas : Control
         g.DrawString(room.Name, Font, textBrush, rect.X + 5, rect.Y + 5);
     }
 
+    private void DrawDoor(Graphics g, Door door, bool selected)
+    {
+        var rect = WorldRectToScreen(door.X, door.Y, door.Width, door.Depth);
+        using var fill = new SolidBrush(selected ? Color.FromArgb(150, 255, 155, 45) : Color.FromArgb(105, 210, 125, 35));
+        using var outline = new Pen(selected ? Color.Gold : Color.Orange, selected ? 3f : 2f);
+        g.FillRectangle(fill, rect);
+        g.DrawRectangle(outline, rect.X, rect.Y, rect.Width, rect.Height);
+        g.DrawLine(outline, rect.Left, rect.Top, rect.Right, rect.Bottom);
+        g.DrawLine(outline, rect.Right, rect.Top, rect.Left, rect.Bottom);
+
+        using var textBrush = new SolidBrush(Color.White);
+        g.DrawString(door.Name, Font, textBrush, rect.X + 4, rect.Y + 4);
+    }
+
     private void DrawThing(Graphics g, MapThing thing, bool selected)
     {
         var p = WorldToScreen(thing.X, thing.Y);
@@ -484,14 +565,14 @@ public sealed class MapCanvas : Control
         g.DrawLine(outline, p, end);
     }
 
-    private void DrawDraftRoom(Graphics g)
+    private void DrawDraftArea(Graphics g)
     {
-        var x = Math.Min(_roomStart.X, _roomCurrent.X);
-        var y = Math.Min(_roomStart.Y, _roomCurrent.Y);
-        var w = Math.Abs(_roomCurrent.X - _roomStart.X);
-        var d = Math.Abs(_roomCurrent.Y - _roomStart.Y);
+        var x = Math.Min(_areaStart.X, _areaCurrent.X);
+        var y = Math.Min(_areaStart.Y, _areaCurrent.Y);
+        var w = Math.Abs(_areaCurrent.X - _areaStart.X);
+        var d = Math.Abs(_areaCurrent.Y - _areaStart.Y);
         var rect = WorldRectToScreen(x, y, w, d);
-        using var pen = new Pen(Color.Gold, 2f) { DashStyle = DashStyle.Dash };
+        using var pen = new Pen(_drawingTool == EditorTool.Door ? Color.Orange : Color.Gold, 2f) { DashStyle = DashStyle.Dash };
         g.DrawRectangle(pen, rect.X, rect.Y, rect.Width, rect.Height);
     }
 
@@ -516,9 +597,11 @@ public sealed class MapCanvas : Control
         switch (_tool)
         {
             case EditorTool.Room:
-                _drawingRoom = true;
-                _roomStart = world;
-                _roomCurrent = world;
+            case EditorTool.Door:
+                _drawingArea = true;
+                _drawingTool = _tool;
+                _areaStart = world;
+                _areaCurrent = world;
                 Capture = true;
                 break;
 
@@ -535,23 +618,22 @@ public sealed class MapCanvas : Control
                 var hit = HitTest(e.Location);
                 Select(hit);
                 if (hit is Room room)
-                {
-                    _dragging = true;
-                    _dragStartWorld = world;
-                    _dragStartX = room.X;
-                    _dragStartY = room.Y;
-                    Capture = true;
-                }
+                    BeginDrag(world, room.X, room.Y);
+                else if (hit is Door door)
+                    BeginDrag(world, door.X, door.Y);
                 else if (hit is MapThing thing)
-                {
-                    _dragging = true;
-                    _dragStartWorld = world;
-                    _dragStartX = thing.X;
-                    _dragStartY = thing.Y;
-                    Capture = true;
-                }
+                    BeginDrag(world, thing.X, thing.Y);
                 break;
         }
+    }
+
+    private void BeginDrag(PointF world, int x, int y)
+    {
+        _dragging = true;
+        _dragStartWorld = world;
+        _dragStartX = x;
+        _dragStartY = y;
+        Capture = true;
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -569,9 +651,9 @@ public sealed class MapCanvas : Control
 
         var world = Snap(ScreenToWorld(e.Location));
 
-        if (_drawingRoom)
+        if (_drawingArea)
         {
-            _roomCurrent = world;
+            _areaCurrent = world;
             Invalidate();
             return;
         }
@@ -581,15 +663,20 @@ public sealed class MapCanvas : Control
             var dx = (int)(world.X - _dragStartWorld.X);
             var dy = (int)(world.Y - _dragStartWorld.Y);
 
-            if (_selected is Room room)
+            switch (_selected)
             {
-                room.X = _dragStartX + dx;
-                room.Y = _dragStartY + dy;
-            }
-            else if (_selected is MapThing thing)
-            {
-                thing.X = _dragStartX + dx;
-                thing.Y = _dragStartY + dy;
+                case Room room:
+                    room.X = _dragStartX + dx;
+                    room.Y = _dragStartY + dy;
+                    break;
+                case Door door:
+                    door.X = _dragStartX + dx;
+                    door.Y = _dragStartY + dy;
+                    break;
+                case MapThing thing:
+                    thing.X = _dragStartX + dx;
+                    thing.Y = _dragStartY + dy;
+                    break;
             }
 
             ProjectChanged?.Invoke();
@@ -610,28 +697,47 @@ public sealed class MapCanvas : Control
 
         if (e.Button != MouseButtons.Left) return;
 
-        if (_drawingRoom)
+        if (_drawingArea)
         {
-            _drawingRoom = false;
+            _drawingArea = false;
             Capture = false;
 
-            var x = (int)Math.Min(_roomStart.X, _roomCurrent.X);
-            var y = (int)Math.Min(_roomStart.Y, _roomCurrent.Y);
-            var width = (int)Math.Abs(_roomCurrent.X - _roomStart.X);
-            var depth = (int)Math.Abs(_roomCurrent.Y - _roomStart.Y);
+            var x = (int)Math.Min(_areaStart.X, _areaCurrent.X);
+            var y = (int)Math.Min(_areaStart.Y, _areaCurrent.Y);
+            var width = (int)Math.Abs(_areaCurrent.X - _areaStart.X);
+            var depth = (int)Math.Abs(_areaCurrent.Y - _areaStart.Y);
 
             if (width >= GridSize && depth >= GridSize)
             {
-                var room = new Room
+                if (_drawingTool == EditorTool.Room)
                 {
-                    Name = $"Room {_project.Rooms.Count + 1}",
-                    X = x,
-                    Y = y,
-                    Width = width,
-                    Depth = depth
-                };
-                _project.Rooms.Add(room);
-                Select(room);
+                    var room = new Room
+                    {
+                        Name = $"Room {_project.Rooms.Count + 1}",
+                        X = x,
+                        Y = y,
+                        Width = width,
+                        Depth = depth
+                    };
+                    _project.Rooms.Add(room);
+                    Select(room);
+                }
+                else if (_drawingTool == EditorTool.Door)
+                {
+                    var nextTag = _project.Doors.Count == 0 ? 100 : _project.Doors.Max(d => d.Tag) + 1;
+                    var door = new Door
+                    {
+                        Name = $"Door {_project.Doors.Count + 1}",
+                        X = x,
+                        Y = y,
+                        Width = width,
+                        Depth = depth,
+                        Tag = nextTag
+                    };
+                    _project.Doors.Add(door);
+                    Select(door);
+                }
+
                 ProjectChanged?.Invoke();
             }
 
@@ -671,6 +777,7 @@ public sealed class MapCanvas : Control
         if (e.KeyCode == Keys.Delete && _selected is not null)
         {
             if (_selected is Room room) _project.Rooms.Remove(room);
+            if (_selected is Door door) _project.Doors.Remove(door);
             if (_selected is MapThing thing) _project.Things.Remove(thing);
             Select(null);
             ProjectChanged?.Invoke();
@@ -692,6 +799,15 @@ public sealed class MapCanvas : Control
         }
 
         var world = ScreenToWorld(screenPoint);
+
+        for (var i = _project.Doors.Count - 1; i >= 0; i--)
+        {
+            var door = _project.Doors[i];
+            if (world.X >= door.X && world.X <= door.X + door.Width &&
+                world.Y >= door.Y && world.Y <= door.Y + door.Depth)
+                return door;
+        }
+
         for (var i = _project.Rooms.Count - 1; i >= 0; i--)
         {
             var room = _project.Rooms[i];
