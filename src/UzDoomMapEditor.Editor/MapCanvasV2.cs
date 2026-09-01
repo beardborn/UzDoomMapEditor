@@ -399,7 +399,7 @@ public sealed class MapCanvas : Control
 
             case EditorTool.Door:
                 if (!TryPlaceWallDoor(e.Location))
-                    BeginAreaDraw(EditorTool.Door, world); // legacy gap connector remains available
+                    BeginAreaDraw(EditorTool.Door, world);
                 break;
 
             case EditorTool.PlayerStart:
@@ -728,8 +728,8 @@ public sealed class MapCanvas : Control
             var inwardY = wall.Constant + (center.Y >= wall.Constant ? inset : -inset);
             p1 = new MapVertex(first, wall.Constant);
             p2 = new MapVertex(second, wall.Constant);
-            i1 = new MapVertex(first, (int)Math.Round(inwardY));
-            i2 = new MapVertex(second, (int)Math.Round(inwardY));
+            i1 = new MapVertex(first, inwardY);
+            i2 = new MapVertex(second, inwardY);
         }
         else
         {
@@ -738,8 +738,8 @@ public sealed class MapCanvas : Control
             var inwardX = wall.Constant + (center.X >= wall.Constant ? inset : -inset);
             p1 = new MapVertex(wall.Constant, first);
             p2 = new MapVertex(wall.Constant, second);
-            i1 = new MapVertex((int)Math.Round(inwardX), first);
-            i2 = new MapVertex((int)Math.Round(inwardX), second);
+            i1 = new MapVertex(inwardX, first);
+            i2 = new MapVertex(inwardX, second);
         }
 
         var rebuilt = new List<MapVertex>(sector.Vertices.Count + 4);
@@ -881,8 +881,6 @@ public sealed class MapCanvas : Control
                 changed = _project.Sectors.Remove(sector);
                 break;
             case Door door:
-                // Removing an embedded door deliberately leaves the recessed wall behind,
-                // which gives the user a normal solid wall rather than reopening a hole.
                 changed = _project.Doors.Remove(door);
                 break;
             case MapThing thing:
