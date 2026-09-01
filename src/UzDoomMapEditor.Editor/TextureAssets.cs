@@ -3,16 +3,18 @@ using System.Text.Json;
 
 namespace UzDoomMapEditor.Editor;
 
-internal enum TextureCategory
+internal enum TextureApplyTarget
 {
-    Walls,
-    Floors,
-    Ceilings,
-    Doors
+    Auto,
+    Wall,
+    Floor,
+    Ceiling,
+    Door
 }
 
-internal sealed record TextureAsset(string Name, string FilePath, TextureCategory Category)
+internal sealed record TextureAsset(string Name, string FilePath, int Width, int Height)
 {
+    public string SizeText => $"{Width}×{Height}";
     public override string ToString() => Name;
 }
 
@@ -40,9 +42,7 @@ internal static class TextureAssetLibrary
         Directory.CreateDirectory(projectRoot);
         Directory.CreateDirectory(Path.Combine(projectRoot, "Maps"));
         Directory.CreateDirectory(Path.Combine(projectRoot, "Build"));
-
-        foreach (TextureCategory category in Enum.GetValues<TextureCategory>())
-            Directory.CreateDirectory(GetCategoryDirectory(projectRoot, category));
+        Directory.CreateDirectory(GetTextureDirectory(projectRoot));
     }
 
     public static void WriteDescriptor(string projectRoot, string name)
@@ -53,7 +53,7 @@ internal static class TextureAssetLibrary
         File.WriteAllText(Path.Combine(projectRoot, "project.uzgame"), json);
     }
 
-    public static TextureAsset ImportPng(string projectRoot, string sourcePath, TextureCategory category)
+    public static TextureAsset ImportPng(string projectRoot, string sourcePath)
     {
         if (!File.Exists(sourcePath))
             throw new FileNotFoundException("Texture file was not found.", sourcePath);
@@ -63,9 +63,11 @@ internal static class TextureAssetLibrary
 
         EnsureStructure(projectRoot);
         var name = MakeUniqueName(projectRoot, SanitizeTextureName(Path.GetFileNameWithoutExtension(sourcePath)));
-        var destination = Path.Combine(GetCategoryDirectory(projectRoot, category), name + ".png");
+        var destination = Path.Combine(GetTextureDirectory(projectRoot), name + ".png");
         File.Copy(sourcePath, destination, overwrite: false);
-        return new TextureAsset(name, destination, category);
+
+        using var image = Image.FromFile(destination);
+        return new TextureAsset(name, destination, image.Width, image.Height);
     }
 
     public static IReadOnlyList<TextureAsset> Scan(string? projectRoot)
@@ -73,27 +75,34 @@ internal static class TextureAssetLibrary
         if (string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
             return Array.Empty<TextureAsset>();
 
-        var result = new List<TextureAsset>();
-        foreach (TextureCategory category in Enum.GetValues<TextureCategory>())
-        {
-            var directory = GetCategoryDirectory(projectRoot, category);
-            if (!Directory.Exists(directory)) continue;
+        var root = GetTextureDirectory(projectRoot);
+        if (!Directory.Exists(root)) return Array.Empty<TextureAsset>();
 
-            foreach (var file in Directory.EnumerateFiles(directory, "*.png", SearchOption.TopDirectoryOnly))
-                result.Add(new TextureAsset(Path.GetFileNameWithoutExtension(file).ToUpperInvariant(), file, category));
+        var result = new List<TextureAsset>();
+        foreach (var file in Directory.EnumerateFiles(root, "*.png", SearchOption.AllDirectories))
+        {
+            try
+            {
+                using var image = Image.FromFile(file);
+                result.Add(new TextureAsset(
+                    Path.GetFileNameWithoutExtension(file).ToUpperInvariant(),
+                    file,
+                    image.Width,
+                    image.Height));
+            }
+            catch
+            {
+                // Ignore broken images. The browser should remain usable.
+            }
         }
 
         return result
-            .OrderBy(a => a.Category)
-            .ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(a => a.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
-    public static string GetCategoryDirectory(string projectRoot, TextureCategory category)
-        => Path.Combine(projectRoot, "Assets", "Textures", category.ToString());
-
-    public static string GetPk3Namespace(TextureCategory category)
-        => category is TextureCategory.Floors or TextureCategory.Ceilings ? "flats" : "textures";
+    public static string GetTextureDirectory(string projectRoot)
+        => Path.Combine(projectRoot, "Assets", "Textures");
 
     private static string SanitizeTextureName(string source)
     {
@@ -141,7 +150,10 @@ internal static class Pk3Builder
 
         foreach (var asset in assets)
         {
-            var enginePath = $"{TextureAssetLibrary.GetPk3Namespace(asset.Category)}/{Path.GetFileName(asset.FilePath)}";
+            // UZDoom's texture manager can use modern texture-namespace images on
+            // walls, floors and ceilings. Keeping one copy means the editor does
+            // not force artists to decide what a PNG is allowed to be used for.
+            var enginePath = $"textures/{asset.Name}.png";
             if (!engineNames.Add(enginePath))
                 throw new InvalidOperationException($"Two project textures would both become '{enginePath}' in the PK3. Rename one of them.");
 
@@ -157,17 +169,19 @@ internal static class Pk3Builder
 
 internal sealed class TextureBrowserControl : UserControl
 {
-    private readonly ComboBox _category = new();
     private readonly TextBox _search = new();
     private readonly Button _import = new();
-    private readonly Button _apply = new();
+    private readonly Button _wall = new();
+    private readonly Button _floor = new();
+    private readonly Button _ceiling = new();
+    private readonly Button _door = new();
     private readonly Label _hint = new();
     private readonly ListView _list = new();
     private readonly ImageList _images = new();
 
     private string? _projectRoot;
 
-    public event Action<TextureAsset>? ApplyRequested;
+    public event Action<TextureAsset, TextureApplyTarget>? ApplyRequested;
     public event Action<TextureAsset>? AssetImported;
 
     public TextureBrowserControl()
@@ -181,7 +195,7 @@ internal sealed class TextureBrowserControl : UserControl
         var bar = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = 34,
+            Height = 40,
             WrapContents = false,
             FlowDirection = FlowDirection.LeftToRight,
             BackColor = DarkTheme.Surface,
@@ -190,44 +204,37 @@ internal sealed class TextureBrowserControl : UserControl
 
         var title = new Label
         {
-            Text = "TEXTURES",
+            Text = "PROJECT TEXTURES",
             AutoSize = true,
             ForeColor = DarkTheme.Text,
-            Margin = new Padding(3, 6, 8, 0)
+            Margin = new Padding(3, 7, 8, 0)
         };
 
-        _category.DropDownStyle = ComboBoxStyle.DropDownList;
-        _category.Width = 110;
-        _category.Items.AddRange(Enum.GetValues<TextureCategory>().Cast<object>().ToArray());
-        _category.SelectedItem = TextureCategory.Walls;
-        _category.SelectedIndexChanged += (_, _) => Reload();
-
-        _search.Width = 180;
+        _search.Width = 170;
         _search.PlaceholderText = "Search textures...";
         _search.TextChanged += (_, _) => Reload();
 
-        _import.Text = "Import PNG";
-        _import.AutoSize = true;
-        _import.Click += (_, _) => ImportCurrentCategory();
-
-        _apply.Text = "Apply Selected";
-        _apply.AutoSize = true;
-        _apply.Enabled = false;
-        _apply.Click += (_, _) => ApplySelected();
+        ConfigureButton(_import, "Import PNG", (_, _) => ImportTextures());
+        ConfigureButton(_wall, "Wall", (_, _) => ApplySelected(TextureApplyTarget.Wall));
+        ConfigureButton(_floor, "Floor", (_, _) => ApplySelected(TextureApplyTarget.Floor));
+        ConfigureButton(_ceiling, "Ceiling", (_, _) => ApplySelected(TextureApplyTarget.Ceiling));
+        ConfigureButton(_door, "Door", (_, _) => ApplySelected(TextureApplyTarget.Door));
 
         _hint.AutoSize = true;
         _hint.ForeColor = DarkTheme.MutedText;
-        _hint.Margin = new Padding(10, 6, 0, 0);
+        _hint.Margin = new Padding(10, 7, 0, 0);
 
         bar.Controls.Add(title);
-        bar.Controls.Add(_category);
         bar.Controls.Add(_search);
         bar.Controls.Add(_import);
-        bar.Controls.Add(_apply);
+        bar.Controls.Add(_wall);
+        bar.Controls.Add(_floor);
+        bar.Controls.Add(_ceiling);
+        bar.Controls.Add(_door);
         bar.Controls.Add(_hint);
 
         _images.ColorDepth = ColorDepth.Depth32Bit;
-        _images.ImageSize = new Size(80, 80);
+        _images.ImageSize = new Size(88, 88);
         _images.TransparentColor = Color.Transparent;
 
         _list.Dock = DockStyle.Fill;
@@ -235,11 +242,12 @@ internal sealed class TextureBrowserControl : UserControl
         _list.LargeImageList = _images;
         _list.MultiSelect = false;
         _list.HideSelection = false;
+        _list.ShowItemToolTips = true;
         _list.BackColor = DarkTheme.Window;
         _list.ForeColor = DarkTheme.Text;
         _list.BorderStyle = BorderStyle.FixedSingle;
-        _list.SelectedIndexChanged += (_, _) => _apply.Enabled = SelectedAsset is not null;
-        _list.DoubleClick += (_, _) => ApplySelected();
+        _list.SelectedIndexChanged += (_, _) => UpdateSelectionState();
+        _list.DoubleClick += (_, _) => ApplySelected(TextureApplyTarget.Auto);
 
         Controls.Add(_list);
         Controls.Add(bar);
@@ -258,11 +266,16 @@ internal sealed class TextureBrowserControl : UserControl
         var enabled = !string.IsNullOrWhiteSpace(projectRoot);
         _import.Enabled = enabled;
         _list.Enabled = enabled;
-        _hint.Text = enabled ? "Double-click to apply" : "Save the map or create a game project to import textures";
+        _hint.Text = enabled
+            ? "Any PNG • recommended 64/128/256 px • select a texture then choose where to apply it"
+            : "Save the map or create a game project to import textures";
         Reload();
     }
 
-    public void ImportCurrentCategory()
+    // Retained for existing menu/toolbar callers. There are no categories now.
+    public void ImportCurrentCategory() => ImportTextures();
+
+    public void ImportTextures()
     {
         if (string.IsNullOrWhiteSpace(_projectRoot))
         {
@@ -274,7 +287,7 @@ internal sealed class TextureBrowserControl : UserControl
         {
             Filter = "PNG textures (*.png)|*.png",
             Multiselect = true,
-            Title = $"Import {_category.SelectedItem ?? TextureCategory.Walls} textures"
+            Title = "Import project textures"
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
@@ -291,11 +304,9 @@ internal sealed class TextureBrowserControl : UserControl
             _images.Images.Clear();
 
             if (string.IsNullOrWhiteSpace(_projectRoot)) return;
-            var category = _category.SelectedItem is TextureCategory value ? value : TextureCategory.Walls;
             var search = _search.Text.Trim();
 
             foreach (var asset in TextureAssetLibrary.Scan(_projectRoot)
-                         .Where(a => a.Category == category)
                          .Where(a => search.Length == 0 || a.Name.Contains(search, StringComparison.OrdinalIgnoreCase)))
             {
                 try
@@ -315,7 +326,11 @@ internal sealed class TextureBrowserControl : UserControl
                     }
 
                     _images.Images.Add(asset.Name, thumb);
-                    var item = new ListViewItem(asset.Name, asset.Name) { Tag = asset };
+                    var item = new ListViewItem($"{asset.Name}\n{asset.SizeText}", asset.Name)
+                    {
+                        Tag = asset,
+                        ToolTipText = $"{asset.Name} • {asset.SizeText} PNG"
+                    };
                     _list.Items.Add(item);
                     if (string.Equals(asset.Name, selectedName, StringComparison.OrdinalIgnoreCase))
                         item.Selected = true;
@@ -329,26 +344,48 @@ internal sealed class TextureBrowserControl : UserControl
         finally
         {
             _list.EndUpdate();
-            _apply.Enabled = SelectedAsset is not null;
+            UpdateSelectionState();
         }
     }
 
-    private void ApplySelected()
+    private static void ConfigureButton(Button button, string text, EventHandler click)
+    {
+        button.Text = text;
+        button.AutoSize = true;
+        button.Enabled = false;
+        button.Click += click;
+    }
+
+    private void UpdateSelectionState()
+    {
+        var selected = SelectedAsset;
+        var enabled = selected is not null;
+        _wall.Enabled = enabled;
+        _floor.Enabled = enabled;
+        _ceiling.Enabled = enabled;
+        _door.Enabled = enabled;
+
+        if (selected is not null)
+            _hint.Text = $"{selected.Name} • {selected.SizeText} • double-click = smart apply";
+        else if (!string.IsNullOrWhiteSpace(_projectRoot))
+            _hint.Text = "Any PNG • recommended 64/128/256 px • select a texture then choose where to apply it";
+    }
+
+    private void ApplySelected(TextureApplyTarget target)
     {
         if (SelectedAsset is { } asset)
-            ApplyRequested?.Invoke(asset);
+            ApplyRequested?.Invoke(asset, target);
     }
 
     private void ImportFiles(IEnumerable<string> files)
     {
         if (string.IsNullOrWhiteSpace(_projectRoot)) return;
-        var category = _category.SelectedItem is TextureCategory value ? value : TextureCategory.Walls;
         TextureAsset? last = null;
 
         try
         {
             foreach (var file in files.Where(f => string.Equals(Path.GetExtension(f), ".png", StringComparison.OrdinalIgnoreCase)))
-                last = TextureAssetLibrary.ImportPng(_projectRoot, file, category);
+                last = TextureAssetLibrary.ImportPng(_projectRoot, file);
 
             Reload();
             if (last is not null) AssetImported?.Invoke(last);
