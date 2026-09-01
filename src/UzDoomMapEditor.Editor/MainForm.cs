@@ -1,23 +1,21 @@
 using System.Diagnostics;
-using System.Drawing.Drawing2D;
 using System.Text.Json;
 using UzDoomMapEditor.Core;
 
 namespace UzDoomMapEditor.Editor;
 
-internal enum EditorTool
-{
-    Select,
-    Room,
-    Door,
-    PlayerStart
-}
-
 public sealed class MainForm : Form
 {
     private readonly MapCanvas _canvas = new();
+    private readonly Map3DPreview _preview = new();
     private readonly PropertyGrid _properties = new() { Dock = DockStyle.Fill, HelpVisible = true, ToolbarVisible = false };
     private readonly ToolStripStatusLabel _status = new("Ready");
+    private readonly EditorHistory _history = new();
+
+    private ToolStrip _toolbar = null!;
+    private ToolStripButton _undoButton = null!;
+    private ToolStripButton _redoButton = null!;
+    private ToolStripComboBox _gridCombo = null!;
 
     private EditorProject _project = new();
     private string? _projectPath;
@@ -27,42 +25,59 @@ public sealed class MainForm : Form
     public MainForm()
     {
         Text = "UZDoom Map Editor";
-        Width = 1400;
-        Height = 900;
+        Width = 1500;
+        Height = 950;
+        MinimumSize = new Size(1000, 650);
         StartPosition = FormStartPosition.CenterScreen;
         KeyPreview = true;
 
         var menu = BuildMenu();
-        var toolbar = BuildToolbar();
+        _toolbar = BuildToolbar();
         var statusStrip = new StatusStrip();
         statusStrip.Items.Add(_status);
 
-        var split = new SplitContainer
+        var workspace = new SplitContainer
+        {
+            Dock = DockStyle.Fill,
+            Orientation = Orientation.Horizontal,
+            SplitterDistance = 500
+        };
+        workspace.Panel1.Controls.Add(_canvas);
+        workspace.Panel2.Controls.Add(_preview);
+        _canvas.Dock = DockStyle.Fill;
+        _preview.Dock = DockStyle.Fill;
+
+        var outer = new SplitContainer
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Vertical,
-            SplitterDistance = 1050,
+            SplitterDistance = 1160,
             FixedPanel = FixedPanel.Panel2
         };
-        split.Panel1.Controls.Add(_canvas);
-        split.Panel2.Controls.Add(_properties);
+        outer.Panel1.Controls.Add(workspace);
+        outer.Panel2.Controls.Add(_properties);
 
-        Controls.Add(split);
+        Controls.Add(outer);
         Controls.Add(statusStrip);
-        Controls.Add(toolbar);
+        Controls.Add(_toolbar);
         Controls.Add(menu);
         MainMenuStrip = menu;
 
-        _canvas.Dock = DockStyle.Fill;
-        _canvas.SelectionChanged += selected => _properties.SelectedObject = selected;
-        _canvas.ProjectChanged += UpdateTitle;
+        _canvas.SelectionChanged += selected =>
+        {
+            _properties.SelectedObject = selected;
+            _properties.Refresh();
+        };
+        _canvas.ProjectEdited += CommitEdit;
+        _canvas.ProjectPreviewChanged += RefreshViews;
+
         _properties.PropertyValueChanged += (_, _) =>
         {
-            _canvas.Invalidate();
-            UpdateTitle();
+            CommitEdit();
+            RefreshViews();
         };
 
-        SetProject(new EditorProject());
+        ApplyProject(new EditorProject(), resetHistory: true, resetViews: true);
         SetTool(EditorTool.Select);
     }
 
@@ -82,13 +97,19 @@ public sealed class MainForm : Form
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add(new ToolStripMenuItem("E&xit", null, (_, _) => Close()));
 
+        var edit = new ToolStripMenuItem("&Edit");
+        edit.DropDownItems.Add(new ToolStripMenuItem("&Undo", null, (_, _) => Undo(), Keys.Control | Keys.Z));
+        edit.DropDownItems.Add(new ToolStripMenuItem("&Redo", null, (_, _) => Redo(), Keys.Control | Keys.Y));
+
         var view = new ToolStripMenuItem("&View");
-        view.DropDownItems.Add(new ToolStripMenuItem("Reset View", null, (_, _) => _canvas.ResetView(), Keys.Home));
+        view.DropDownItems.Add(new ToolStripMenuItem("Reset 2D View", null, (_, _) => _canvas.ResetView()));
+        view.DropDownItems.Add(new ToolStripMenuItem("Reset 3D View", null, (_, _) => _preview.ResetView()));
 
         var build = new ToolStripMenuItem("&Build");
         build.DropDownItems.Add(new ToolStripMenuItem("&Test Map in UZDoom", null, (_, _) => TestMap(), Keys.F5));
 
         menu.Items.Add(file);
+        menu.Items.Add(edit);
         menu.Items.Add(view);
         menu.Items.Add(build);
         return menu;
@@ -98,26 +119,60 @@ public sealed class MainForm : Form
     {
         var toolbar = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Dock = DockStyle.Top };
 
-        var select = new ToolStripButton("Select") { CheckOnClick = true, Tag = EditorTool.Select };
-        var room = new ToolStripButton("Room") { CheckOnClick = true, Tag = EditorTool.Room };
-        var door = new ToolStripButton("Door") { CheckOnClick = true, Tag = EditorTool.Door };
-        var player = new ToolStripButton("Player Start") { CheckOnClick = true, Tag = EditorTool.PlayerStart };
+        AddToolButton(toolbar, "Select", EditorTool.Select);
+        AddToolButton(toolbar, "Vertex", EditorTool.Vertex);
+        AddToolButton(toolbar, "Edge", EditorTool.Edge);
+        toolbar.Items.Add(new ToolStripSeparator());
+        AddToolButton(toolbar, "Room", EditorTool.Room);
+        AddToolButton(toolbar, "Door", EditorTool.Door);
+        AddToolButton(toolbar, "Player Start", EditorTool.PlayerStart);
+
+        toolbar.Items.Add(new ToolStripSeparator());
+        _undoButton = new ToolStripButton("Undo") { ToolTipText = "Undo (Ctrl+Z)" };
+        _redoButton = new ToolStripButton("Redo") { ToolTipText = "Redo (Ctrl+Y)" };
+        _undoButton.Click += (_, _) => Undo();
+        _redoButton.Click += (_, _) => Redo();
+        toolbar.Items.Add(_undoButton);
+        toolbar.Items.Add(_redoButton);
+
+        toolbar.Items.Add(new ToolStripSeparator());
+        toolbar.Items.Add(new ToolStripLabel("Grid"));
+        _gridCombo = new ToolStripComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            AutoSize = false,
+            Width = 70
+        };
+        _gridCombo.Items.AddRange(new object[] { "1", "2", "4", "8", "16", "32", "64", "128", "256" });
+        _gridCombo.SelectedItem = "64";
+        _gridCombo.SelectedIndexChanged += (_, _) =>
+        {
+            if (int.TryParse(_gridCombo.SelectedItem?.ToString(), out var grid))
+            {
+                _canvas.GridSize = grid;
+                _status.Text = $"Grid snap: {grid} units";
+            }
+        };
+        toolbar.Items.Add(_gridCombo);
+
+        toolbar.Items.Add(new ToolStripSeparator());
+        var reset3D = new ToolStripButton("Fit 3D");
+        reset3D.Click += (_, _) => _preview.ResetView();
+        toolbar.Items.Add(reset3D);
+
         var test = new ToolStripButton("▶ Test (F5)");
-
-        select.Click += ToolButtonClicked;
-        room.Click += ToolButtonClicked;
-        door.Click += ToolButtonClicked;
-        player.Click += ToolButtonClicked;
         test.Click += (_, _) => TestMap();
-
-        toolbar.Items.Add(select);
-        toolbar.Items.Add(room);
-        toolbar.Items.Add(door);
-        toolbar.Items.Add(player);
         toolbar.Items.Add(new ToolStripSeparator());
         toolbar.Items.Add(test);
 
         return toolbar;
+    }
+
+    private void AddToolButton(ToolStrip toolbar, string text, EditorTool tool)
+    {
+        var button = new ToolStripButton(text) { CheckOnClick = true, Tag = tool };
+        button.Click += ToolButtonClicked;
+        toolbar.Items.Add(button);
     }
 
     private void ToolButtonClicked(object? sender, EventArgs e)
@@ -131,21 +186,19 @@ public sealed class MainForm : Form
         _canvas.Tool = tool;
         _status.Text = tool switch
         {
-            EditorTool.Select => "Select: click an object; drag to move. Middle mouse pans. Wheel zooms.",
-            EditorTool.Room => "Room: drag a rectangle on the grid.",
-            EditorTool.Door => "Door: drag a rectangular connector across the gap between two room edges.",
-            EditorTool.PlayerStart => "Player Start: click to place the player start.",
+            EditorTool.Select => "Select: click an object or sector and drag it. Middle mouse pans the 2D view.",
+            EditorTool.Vertex => "Vertex: drag corners. Double-click an edge to insert a new vertex. Delete removes a selected vertex when possible.",
+            EditorTool.Edge => "Edge: click an edge and drag both of its vertices together.",
+            EditorTool.Room => "Room: drag a rectangle. It becomes a real editable polygon sector.",
+            EditorTool.Door => "Door: drag a connector across the gap between two sector edges.",
+            EditorTool.PlayerStart => "Player Start: click inside a sector to place the player.",
             _ => "Ready"
         };
 
-        foreach (Control control in Controls)
+        foreach (ToolStripItem item in _toolbar.Items)
         {
-            if (control is not ToolStrip strip || strip is MenuStrip || strip is StatusStrip) continue;
-            foreach (ToolStripItem item in strip.Items)
-            {
-                if (item is ToolStripButton button && button.Tag is EditorTool buttonTool)
-                    button.Checked = buttonTool == tool;
-            }
+            if (item is ToolStripButton button && button.Tag is EditorTool buttonTool)
+                button.Checked = buttonTool == tool;
         }
 
         _canvas.Focus();
@@ -153,21 +206,67 @@ public sealed class MainForm : Form
 
     private void NewProject()
     {
-        SetProject(new EditorProject());
         _projectPath = null;
+        ApplyProject(new EditorProject(), resetHistory: true, resetViews: true);
+        SetTool(EditorTool.Select);
+    }
+
+    private void ApplyProject(EditorProject project, bool resetHistory, bool resetViews)
+    {
+        project.Normalize();
+        _project = project;
+        _canvas.Project = _project;
+        _preview.Project = _project;
+        _properties.SelectedObject = null;
+
+        if (resetHistory)
+            _history.Reset(_project);
+
+        if (resetViews)
+        {
+            _canvas.ResetView();
+            _preview.ResetView();
+        }
+
+        UpdateHistoryButtons();
+        UpdateTitle();
+        RefreshViews();
+    }
+
+    private void CommitEdit()
+    {
+        _project.Normalize();
+        _history.Commit(_project);
+        UpdateHistoryButtons();
         UpdateTitle();
     }
 
-    private void SetProject(EditorProject project)
+    private void Undo()
     {
-        project.Rooms ??= new List<Room>();
-        project.Doors ??= new List<Door>();
-        project.Things ??= new List<MapThing>();
-        _project = project;
-        _canvas.Project = _project;
-        _properties.SelectedObject = null;
-        _canvas.ResetView();
-        UpdateTitle();
+        if (!_history.TryUndo(out var project)) return;
+        ApplyProject(project, resetHistory: false, resetViews: false);
+        _status.Text = "Undo";
+    }
+
+    private void Redo()
+    {
+        if (!_history.TryRedo(out var project)) return;
+        ApplyProject(project, resetHistory: false, resetViews: false);
+        _status.Text = "Redo";
+    }
+
+    private void UpdateHistoryButtons()
+    {
+        if (_undoButton is null || _redoButton is null) return;
+        _undoButton.Enabled = _history.CanUndo;
+        _redoButton.Enabled = _history.CanRedo;
+    }
+
+    private void RefreshViews()
+    {
+        _canvas.Invalidate();
+        _preview.Invalidate();
+        _properties.Refresh();
     }
 
     private void OpenProject()
@@ -184,7 +283,8 @@ public sealed class MainForm : Form
             var json = File.ReadAllText(dialog.FileName);
             var project = JsonSerializer.Deserialize<EditorProject>(json) ?? throw new InvalidDataException("Project file was empty.");
             _projectPath = dialog.FileName;
-            SetProject(project);
+            ApplyProject(project, resetHistory: true, resetViews: true);
+            _status.Text = $"Opened {Path.GetFileName(dialog.FileName)}";
         }
         catch (Exception ex)
         {
@@ -199,7 +299,6 @@ public sealed class MainForm : Form
             SaveProjectAs();
             return;
         }
-
         WriteProject(_projectPath);
     }
 
@@ -221,6 +320,7 @@ public sealed class MainForm : Form
 
     private void WriteProject(string path)
     {
+        _project.Normalize();
         var json = JsonSerializer.Serialize(_project, new JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(path, json);
         _status.Text = $"Saved {Path.GetFileName(path)}";
@@ -296,9 +396,9 @@ public sealed class MainForm : Form
 
     private bool ValidateForTest()
     {
-        if (_project.Rooms.Count == 0)
+        if (_project.Sectors.Count == 0)
         {
-            MessageBox.Show(this, "Draw at least one room first.", "Nothing to test", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "Draw at least one room/sector first.", "Nothing to test", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return false;
         }
 
@@ -310,11 +410,11 @@ public sealed class MainForm : Form
 
         foreach (var door in _project.Doors)
         {
-            if (CountTouchingRooms(door) < 2)
+            if (CountTouchingSectors(door) < 2)
             {
                 MessageBox.Show(
                     this,
-                    $"{door.Name} is not connected to two room edges yet.\n\nFor now, leave a gap between two rooms and drag the Door rectangle so it touches both rooms.",
+                    $"{door.Name} is not touching two sector edges. Leave a gap between two rooms and place the door so opposite sides touch the sector boundaries.",
                     "Door is not connected",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
@@ -325,25 +425,50 @@ public sealed class MainForm : Form
         return true;
     }
 
-    private int CountTouchingRooms(Door door)
+    private int CountTouchingSectors(Door door)
     {
+        var doorVertices = door.GetVertices();
         var count = 0;
-        var doorX2 = door.X + door.Width;
-        var doorY2 = door.Y + door.Depth;
 
-        foreach (var room in _project.Rooms)
+        foreach (var sector in _project.Sectors)
         {
-            var roomX2 = room.X + room.Width;
-            var roomY2 = room.Y + room.Depth;
-            var overlapX = Math.Min(roomX2, doorX2) - Math.Max(room.X, door.X);
-            var overlapY = Math.Min(roomY2, doorY2) - Math.Max(room.Y, door.Y);
-
-            var sharesVerticalEdge = overlapY > 0 && (roomX2 == door.X || room.X == doorX2);
-            var sharesHorizontalEdge = overlapX > 0 && (roomY2 == door.Y || room.Y == doorY2);
-            if (sharesVerticalEdge || sharesHorizontalEdge) count++;
+            var touches = false;
+            for (var i = 0; i < doorVertices.Count && !touches; i++)
+            {
+                var da = doorVertices[i];
+                var db = doorVertices[(i + 1) % doorVertices.Count];
+                for (var j = 0; j < sector.Vertices.Count; j++)
+                {
+                    var sa = sector.Vertices[j];
+                    var sb = sector.Vertices[(j + 1) % sector.Vertices.Count];
+                    if (SegmentsShareLength(da, db, sa, sb))
+                    {
+                        touches = true;
+                        break;
+                    }
+                }
+            }
+            if (touches) count++;
         }
 
         return count;
+    }
+
+    private static bool SegmentsShareLength(MapVertex a, MapVertex b, MapVertex c, MapVertex d)
+    {
+        var dx = b.X - a.X;
+        var dy = b.Y - a.Y;
+        var crossDir = (long)dx * (d.Y - c.Y) - (long)dy * (d.X - c.X);
+        var crossOffset = (long)dx * (c.Y - a.Y) - (long)dy * (c.X - a.X);
+        if (crossDir != 0 || crossOffset != 0) return false;
+
+        var len2 = (double)dx * dx + (double)dy * dy;
+        if (len2 <= 0) return false;
+
+        var tc = ((c.X - a.X) * dx + (c.Y - a.Y) * dy) / len2;
+        var td = ((d.X - a.X) * dx + (d.Y - a.Y) * dy) / len2;
+        var overlap = Math.Min(1.0, Math.Max(tc, td)) - Math.Max(0.0, Math.Min(tc, td));
+        return overlap > 0.0001;
     }
 
     private bool TryBuildUdmf(out string text)
@@ -393,452 +518,5 @@ public sealed class MainForm : Form
     {
         var name = string.IsNullOrWhiteSpace(_project.Name) ? "Untitled" : _project.Name;
         Text = $"UZDoom Map Editor - {name}";
-    }
-}
-
-public sealed class MapCanvas : Control
-{
-    public const int GridSize = 64;
-
-    private EditorProject _project = new();
-    private EditorTool _tool;
-    private object? _selected;
-
-    private float _zoom = 1f;
-    private PointF _origin;
-    private bool _originInitialised;
-
-    private bool _drawingArea;
-    private EditorTool _drawingTool;
-    private PointF _areaStart;
-    private PointF _areaCurrent;
-
-    private bool _panning;
-    private Point _panMouseStart;
-    private PointF _panOriginStart;
-
-    private bool _dragging;
-    private PointF _dragStartWorld;
-    private int _dragStartX;
-    private int _dragStartY;
-
-    public event Action<object?>? SelectionChanged;
-    public event Action? ProjectChanged;
-
-    public EditorProject Project
-    {
-        get => _project;
-        set
-        {
-            _project = value ?? new EditorProject();
-            _project.Rooms ??= new List<Room>();
-            _project.Doors ??= new List<Door>();
-            _project.Things ??= new List<MapThing>();
-            _selected = null;
-            Invalidate();
-        }
-    }
-
-    internal EditorTool Tool
-    {
-        get => _tool;
-        set
-        {
-            _tool = value;
-            Cursor = value == EditorTool.Select ? Cursors.Default : Cursors.Cross;
-            Invalidate();
-        }
-    }
-
-    public MapCanvas()
-    {
-        DoubleBuffered = true;
-        BackColor = Color.FromArgb(34, 36, 40);
-        ForeColor = Color.Gainsboro;
-        TabStop = true;
-        SetStyle(ControlStyles.ResizeRedraw | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
-    }
-
-    public void ResetView()
-    {
-        _zoom = 1f;
-        _origin = new PointF(ClientSize.Width / 2f, ClientSize.Height / 2f);
-        _originInitialised = true;
-        Invalidate();
-    }
-
-    protected override void OnResize(EventArgs e)
-    {
-        base.OnResize(e);
-        if (!_originInitialised && ClientSize.Width > 0 && ClientSize.Height > 0)
-            ResetView();
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        base.OnPaint(e);
-        e.Graphics.SmoothingMode = SmoothingMode.None;
-        DrawGrid(e.Graphics);
-
-        foreach (var room in _project.Rooms)
-            DrawRoom(e.Graphics, room, ReferenceEquals(room, _selected));
-
-        foreach (var door in _project.Doors)
-            DrawDoor(e.Graphics, door, ReferenceEquals(door, _selected));
-
-        foreach (var thing in _project.Things)
-            DrawThing(e.Graphics, thing, ReferenceEquals(thing, _selected));
-
-        if (_drawingArea)
-            DrawDraftArea(e.Graphics);
-    }
-
-    private void DrawGrid(Graphics g)
-    {
-        var a = ScreenToWorld(new Point(0, 0));
-        var b = ScreenToWorld(new Point(ClientSize.Width, ClientSize.Height));
-        var minX = Math.Min(a.X, b.X);
-        var maxX = Math.Max(a.X, b.X);
-        var minY = Math.Min(a.Y, b.Y);
-        var maxY = Math.Max(a.Y, b.Y);
-
-        var firstX = (int)Math.Floor(minX / GridSize) * GridSize;
-        var firstY = (int)Math.Floor(minY / GridSize) * GridSize;
-
-        using var gridPen = new Pen(Color.FromArgb(55, 58, 64));
-        using var majorPen = new Pen(Color.FromArgb(72, 76, 84));
-        using var axisPen = new Pen(Color.FromArgb(115, 120, 132));
-
-        for (var x = firstX; x <= maxX + GridSize; x += GridSize)
-        {
-            var sx = WorldToScreen(x, 0).X;
-            var pen = x == 0 ? axisPen : (Math.Abs(x / GridSize) % 4 == 0 ? majorPen : gridPen);
-            g.DrawLine(pen, sx, 0, sx, ClientSize.Height);
-        }
-
-        for (var y = firstY; y <= maxY + GridSize; y += GridSize)
-        {
-            var sy = WorldToScreen(0, y).Y;
-            var pen = y == 0 ? axisPen : (Math.Abs(y / GridSize) % 4 == 0 ? majorPen : gridPen);
-            g.DrawLine(pen, 0, sy, ClientSize.Width, sy);
-        }
-    }
-
-    private void DrawRoom(Graphics g, Room room, bool selected)
-    {
-        var rect = WorldRectToScreen(room.X, room.Y, room.Width, room.Depth);
-        using var fill = new SolidBrush(selected ? Color.FromArgb(80, 80, 160, 230) : Color.FromArgb(55, 120, 145, 165));
-        using var outline = new Pen(selected ? Color.DeepSkyBlue : Color.Silver, selected ? 3f : 1.5f);
-        g.FillRectangle(fill, rect);
-        g.DrawRectangle(outline, rect.X, rect.Y, rect.Width, rect.Height);
-
-        using var textBrush = new SolidBrush(Color.WhiteSmoke);
-        g.DrawString(room.Name, Font, textBrush, rect.X + 5, rect.Y + 5);
-    }
-
-    private void DrawDoor(Graphics g, Door door, bool selected)
-    {
-        var rect = WorldRectToScreen(door.X, door.Y, door.Width, door.Depth);
-        using var fill = new SolidBrush(selected ? Color.FromArgb(150, 255, 155, 45) : Color.FromArgb(105, 210, 125, 35));
-        using var outline = new Pen(selected ? Color.Gold : Color.Orange, selected ? 3f : 2f);
-        g.FillRectangle(fill, rect);
-        g.DrawRectangle(outline, rect.X, rect.Y, rect.Width, rect.Height);
-        g.DrawLine(outline, rect.Left, rect.Top, rect.Right, rect.Bottom);
-        g.DrawLine(outline, rect.Right, rect.Top, rect.Left, rect.Bottom);
-
-        using var textBrush = new SolidBrush(Color.White);
-        g.DrawString(door.Name, Font, textBrush, rect.X + 4, rect.Y + 4);
-    }
-
-    private void DrawThing(Graphics g, MapThing thing, bool selected)
-    {
-        var p = WorldToScreen(thing.X, thing.Y);
-        var radius = Math.Max(7f, 12f * _zoom);
-        var rect = new RectangleF(p.X - radius, p.Y - radius, radius * 2, radius * 2);
-        using var fill = new SolidBrush(thing.Type == 1 ? Color.FromArgb(220, 90, 210, 110) : Color.FromArgb(220, 220, 180, 70));
-        using var outline = new Pen(selected ? Color.White : Color.Black, selected ? 3f : 1f);
-        g.FillEllipse(fill, rect);
-        g.DrawEllipse(outline, rect);
-
-        var radians = thing.Angle * MathF.PI / 180f;
-        var end = new PointF(p.X + MathF.Cos(radians) * radius * 1.6f, p.Y - MathF.Sin(radians) * radius * 1.6f);
-        g.DrawLine(outline, p, end);
-    }
-
-    private void DrawDraftArea(Graphics g)
-    {
-        var x = Math.Min(_areaStart.X, _areaCurrent.X);
-        var y = Math.Min(_areaStart.Y, _areaCurrent.Y);
-        var w = Math.Abs(_areaCurrent.X - _areaStart.X);
-        var d = Math.Abs(_areaCurrent.Y - _areaStart.Y);
-        var rect = WorldRectToScreen(x, y, w, d);
-        using var pen = new Pen(_drawingTool == EditorTool.Door ? Color.Orange : Color.Gold, 2f) { DashStyle = DashStyle.Dash };
-        g.DrawRectangle(pen, rect.X, rect.Y, rect.Width, rect.Height);
-    }
-
-    protected override void OnMouseDown(MouseEventArgs e)
-    {
-        base.OnMouseDown(e);
-        Focus();
-
-        if (e.Button == MouseButtons.Middle)
-        {
-            _panning = true;
-            _panMouseStart = e.Location;
-            _panOriginStart = _origin;
-            Capture = true;
-            return;
-        }
-
-        if (e.Button != MouseButtons.Left) return;
-
-        var world = Snap(ScreenToWorld(e.Location));
-
-        switch (_tool)
-        {
-            case EditorTool.Room:
-            case EditorTool.Door:
-                _drawingArea = true;
-                _drawingTool = _tool;
-                _areaStart = world;
-                _areaCurrent = world;
-                Capture = true;
-                break;
-
-            case EditorTool.PlayerStart:
-                _project.Things.RemoveAll(t => t.Type == 1);
-                var start = new MapThing { Name = "Player 1 Start", Type = 1, X = (int)world.X, Y = (int)world.Y };
-                _project.Things.Add(start);
-                Select(start);
-                ProjectChanged?.Invoke();
-                Invalidate();
-                break;
-
-            case EditorTool.Select:
-                var hit = HitTest(e.Location);
-                Select(hit);
-                if (hit is Room room)
-                    BeginDrag(world, room.X, room.Y);
-                else if (hit is Door door)
-                    BeginDrag(world, door.X, door.Y);
-                else if (hit is MapThing thing)
-                    BeginDrag(world, thing.X, thing.Y);
-                break;
-        }
-    }
-
-    private void BeginDrag(PointF world, int x, int y)
-    {
-        _dragging = true;
-        _dragStartWorld = world;
-        _dragStartX = x;
-        _dragStartY = y;
-        Capture = true;
-    }
-
-    protected override void OnMouseMove(MouseEventArgs e)
-    {
-        base.OnMouseMove(e);
-
-        if (_panning)
-        {
-            _origin = new PointF(
-                _panOriginStart.X + e.X - _panMouseStart.X,
-                _panOriginStart.Y + e.Y - _panMouseStart.Y);
-            Invalidate();
-            return;
-        }
-
-        var world = Snap(ScreenToWorld(e.Location));
-
-        if (_drawingArea)
-        {
-            _areaCurrent = world;
-            Invalidate();
-            return;
-        }
-
-        if (_dragging && _selected is not null)
-        {
-            var dx = (int)(world.X - _dragStartWorld.X);
-            var dy = (int)(world.Y - _dragStartWorld.Y);
-
-            switch (_selected)
-            {
-                case Room room:
-                    room.X = _dragStartX + dx;
-                    room.Y = _dragStartY + dy;
-                    break;
-                case Door door:
-                    door.X = _dragStartX + dx;
-                    door.Y = _dragStartY + dy;
-                    break;
-                case MapThing thing:
-                    thing.X = _dragStartX + dx;
-                    thing.Y = _dragStartY + dy;
-                    break;
-            }
-
-            ProjectChanged?.Invoke();
-            Invalidate();
-        }
-    }
-
-    protected override void OnMouseUp(MouseEventArgs e)
-    {
-        base.OnMouseUp(e);
-
-        if (e.Button == MouseButtons.Middle)
-        {
-            _panning = false;
-            Capture = false;
-            return;
-        }
-
-        if (e.Button != MouseButtons.Left) return;
-
-        if (_drawingArea)
-        {
-            _drawingArea = false;
-            Capture = false;
-
-            var x = (int)Math.Min(_areaStart.X, _areaCurrent.X);
-            var y = (int)Math.Min(_areaStart.Y, _areaCurrent.Y);
-            var width = (int)Math.Abs(_areaCurrent.X - _areaStart.X);
-            var depth = (int)Math.Abs(_areaCurrent.Y - _areaStart.Y);
-
-            if (width >= GridSize && depth >= GridSize)
-            {
-                if (_drawingTool == EditorTool.Room)
-                {
-                    var room = new Room
-                    {
-                        Name = $"Room {_project.Rooms.Count + 1}",
-                        X = x,
-                        Y = y,
-                        Width = width,
-                        Depth = depth
-                    };
-                    _project.Rooms.Add(room);
-                    Select(room);
-                }
-                else if (_drawingTool == EditorTool.Door)
-                {
-                    var nextTag = _project.Doors.Count == 0 ? 100 : _project.Doors.Max(d => d.Tag) + 1;
-                    var door = new Door
-                    {
-                        Name = $"Door {_project.Doors.Count + 1}",
-                        X = x,
-                        Y = y,
-                        Width = width,
-                        Depth = depth,
-                        Tag = nextTag
-                    };
-                    _project.Doors.Add(door);
-                    Select(door);
-                }
-
-                ProjectChanged?.Invoke();
-            }
-
-            Invalidate();
-        }
-
-        if (_dragging)
-        {
-            _dragging = false;
-            Capture = false;
-            ProjectChanged?.Invoke();
-        }
-    }
-
-    protected override void OnMouseWheel(MouseEventArgs e)
-    {
-        base.OnMouseWheel(e);
-
-        var before = ScreenToWorld(e.Location);
-        var factor = e.Delta > 0 ? 1.15f : 1f / 1.15f;
-        _zoom = Math.Clamp(_zoom * factor, 0.25f, 4f);
-        var afterScreen = WorldToScreen(before.X, before.Y);
-        _origin = new PointF(_origin.X + e.X - afterScreen.X, _origin.Y + e.Y - afterScreen.Y);
-        Invalidate();
-    }
-
-    protected override bool IsInputKey(Keys keyData)
-    {
-        if (keyData == Keys.Delete) return true;
-        return base.IsInputKey(keyData);
-    }
-
-    protected override void OnKeyDown(KeyEventArgs e)
-    {
-        base.OnKeyDown(e);
-
-        if (e.KeyCode == Keys.Delete && _selected is not null)
-        {
-            if (_selected is Room room) _project.Rooms.Remove(room);
-            if (_selected is Door door) _project.Doors.Remove(door);
-            if (_selected is MapThing thing) _project.Things.Remove(thing);
-            Select(null);
-            ProjectChanged?.Invoke();
-            Invalidate();
-            e.Handled = true;
-        }
-    }
-
-    private object? HitTest(Point screenPoint)
-    {
-        for (var i = _project.Things.Count - 1; i >= 0; i--)
-        {
-            var thing = _project.Things[i];
-            var p = WorldToScreen(thing.X, thing.Y);
-            var dx = p.X - screenPoint.X;
-            var dy = p.Y - screenPoint.Y;
-            if (dx * dx + dy * dy <= 18f * 18f)
-                return thing;
-        }
-
-        var world = ScreenToWorld(screenPoint);
-
-        for (var i = _project.Doors.Count - 1; i >= 0; i--)
-        {
-            var door = _project.Doors[i];
-            if (world.X >= door.X && world.X <= door.X + door.Width &&
-                world.Y >= door.Y && world.Y <= door.Y + door.Depth)
-                return door;
-        }
-
-        for (var i = _project.Rooms.Count - 1; i >= 0; i--)
-        {
-            var room = _project.Rooms[i];
-            if (world.X >= room.X && world.X <= room.X + room.Width &&
-                world.Y >= room.Y && world.Y <= room.Y + room.Depth)
-                return room;
-        }
-
-        return null;
-    }
-
-    private void Select(object? value)
-    {
-        _selected = value;
-        SelectionChanged?.Invoke(value);
-        Invalidate();
-    }
-
-    private PointF Snap(PointF point) => new(SnapValue(point.X), SnapValue(point.Y));
-    private static int SnapValue(float value) => (int)Math.Round(value / GridSize) * GridSize;
-
-    private PointF WorldToScreen(float x, float y) => new(_origin.X + x * _zoom, _origin.Y - y * _zoom);
-
-    private PointF ScreenToWorld(Point point) => new(
-        (point.X - _origin.X) / _zoom,
-        -((point.Y - _origin.Y) / _zoom));
-
-    private RectangleF WorldRectToScreen(float x, float y, float width, float depth)
-    {
-        var a = WorldToScreen(x, y);
-        var b = WorldToScreen(x + width, y + depth);
-        return RectangleF.FromLTRB(Math.Min(a.X, b.X), Math.Min(a.Y, b.Y), Math.Max(a.X, b.X), Math.Max(a.Y, b.Y));
     }
 }
