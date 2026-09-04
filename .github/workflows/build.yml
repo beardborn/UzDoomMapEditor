@@ -23,3 +23,6 @@ jobs:
 
       - name: Build
         run: dotnet build UzDoomMapEditor.sln --configuration Release --no-restore
+
+      - name: WAD round-trip smoke test
+        run: dotnet run --project tests/UzDoom.Core.SmokeTest/UzDoom.Core.SmokeTest.csproj --configuration Release
