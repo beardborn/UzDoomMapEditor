@@ -81,7 +81,7 @@ public static class DoomPatchCodec
                 if (p + postLength + 1 > data.Length)
                     throw new InvalidDataException($"Patch column {x} has truncated post data.");
 
-                var absoluteTop = topDelta;
+                var absoluteTop = (int)topDelta;
                 if (previousTop >= 0 && topDelta <= previousTop)
                     absoluteTop = previousTop + topDelta;
                 previousTop = absoluteTop;
