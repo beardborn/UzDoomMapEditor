@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Drawing.Drawing2D;
 using UzDoom.Core;
 
@@ -31,6 +32,12 @@ internal sealed class PixelEditorForm : Form
         BackColor = Color.FromArgb(28, 30, 34);
         ForeColor = Color.Gainsboro;
 
+        _paletteGrid = new PaletteGrid(palette)
+        {
+            Dock = DockStyle.Top,
+            Height = 306
+        };
+
         _canvas = new PixelCanvas(image, palette)
         {
             Dock = DockStyle.Fill
@@ -38,12 +45,6 @@ internal sealed class PixelEditorForm : Form
         _canvas.PixelHovered += (_, info) =>
             _status.Text = info is null ? "" : $"X {info.Value.X}, Y {info.Value.Y}, palette {info.Value.PaletteIndex}";
         _canvas.ColorPicked += (_, index) => _paletteGrid.SelectedIndex = index;
-
-        _paletteGrid = new PaletteGrid(palette)
-        {
-            Dock = DockStyle.Top,
-            Height = 306
-        };
         _paletteGrid.SelectedIndexChanged += (_, index) => _canvas.SelectedPaletteIndex = index;
 
         var toolbar = BuildToolbar();
@@ -227,6 +228,8 @@ internal sealed class PaletteGrid : Control
 
     public event EventHandler<int>? SelectedIndexChanged;
 
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int SelectedIndex
     {
         get => _selectedIndex;
@@ -310,9 +313,16 @@ internal sealed class PixelCanvas : ScrollableControl
     public event EventHandler<PixelHoverInfo?>? PixelHovered;
     public event EventHandler<int>? ColorPicked;
 
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public PixelTool Tool { get; set; }
+
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int SelectedPaletteIndex { get; set; }
 
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int Zoom
     {
         get => _zoom;
@@ -331,7 +341,7 @@ internal sealed class PixelCanvas : ScrollableControl
     {
         if (_undo.Count == 0)
             return;
-        _redo.Push(Capture());
+        _redo.Push(CaptureState());
         Restore(_undo.Pop());
     }
 
@@ -339,7 +349,7 @@ internal sealed class PixelCanvas : ScrollableControl
     {
         if (_redo.Count == 0)
             return;
-        _undo.Push(Capture());
+        _undo.Push(CaptureState());
         Restore(_redo.Pop());
     }
 
@@ -511,7 +521,7 @@ internal sealed class PixelCanvas : ScrollableControl
     {
         if (_transactionStarted)
             return;
-        _undo.Push(Capture());
+        _undo.Push(CaptureState());
         if (_undo.Count > 50)
         {
             var keep = _undo.Take(50).Reverse().ToArray();
@@ -523,7 +533,7 @@ internal sealed class PixelCanvas : ScrollableControl
         _transactionStarted = true;
     }
 
-    private PixelState Capture() => new(_indices.ToArray(), _opaque.ToArray());
+    private PixelState CaptureState() => new(_indices.ToArray(), _opaque.ToArray());
 
     private void Restore(PixelState state)
     {
