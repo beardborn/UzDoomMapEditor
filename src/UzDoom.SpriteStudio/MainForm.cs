@@ -45,12 +45,13 @@ internal sealed class MainForm : Form
 
         var outer = new SplitContainer
         {
+            Size = new Size(1180, 700),
             Dock = DockStyle.Fill,
             Orientation = Orientation.Vertical,
-            SplitterDistance = 300,
             BackColor = Color.FromArgb(22, 24, 27),
             Panel1MinSize = 220,
-            Panel2MinSize = 500
+            Panel2MinSize = 500,
+            SplitterDistance = 300
         };
 
         ConfigureSpriteList();
@@ -58,12 +59,13 @@ internal sealed class MainForm : Form
 
         var editorSplit = new SplitContainer
         {
+            Size = new Size(1000, 700),
             Dock = DockStyle.Fill,
             Orientation = Orientation.Vertical,
-            SplitterDistance = 650,
             BackColor = Color.FromArgb(22, 24, 27),
             Panel1MinSize = 350,
-            Panel2MinSize = 220
+            Panel2MinSize = 220,
+            SplitterDistance = 650
         };
         _preview.Dock = DockStyle.Fill;
         editorSplit.Panel1.Controls.Add(_preview);
