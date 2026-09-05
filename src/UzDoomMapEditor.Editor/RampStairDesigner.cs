@@ -138,10 +138,11 @@ internal static class RampStairDesigner
         if (stairs.Count == 0) return;
 
         var others = sectors.Except(stairs).ToList();
+        var defaultRise = DefaultStairRise * Math.Max(1, stairs.Count - 1);
         var startHeight = FindTouchingFloor(stairs[0], others) ?? 0;
-        var endHeight = FindTouchingFloor(stairs[^1], others) ?? startHeight + DefaultStairRise * stairs.Count;
+        var endHeight = FindTouchingFloor(stairs[^1], others) ?? startHeight + defaultRise;
         if (endHeight == startHeight)
-            endHeight = startHeight + DefaultStairRise * stairs.Count;
+            endHeight = startHeight + defaultRise;
 
         for (var i = 0; i < stairs.Count; i++)
         {
