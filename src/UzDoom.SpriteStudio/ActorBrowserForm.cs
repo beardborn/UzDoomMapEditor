@@ -190,6 +190,7 @@ internal sealed class ActorBrowserForm : Form
         _stateList.ForeColor = Color.Gainsboro;
         _stateList.BorderStyle = BorderStyle.FixedSingle;
         _stateList.IntegralHeight = false;
+        _stateList.FormattingEnabled = true;
         _stateList.SelectedIndexChanged += (_, _) => PopulateFrames();
         _stateList.Format += (_, e) =>
         {
