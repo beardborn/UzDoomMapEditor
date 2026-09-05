@@ -26,3 +26,6 @@ jobs:
 
       - name: WAD round-trip smoke test
         run: dotnet run --project tests/UzDoom.Core.SmokeTest/UzDoom.Core.SmokeTest.csproj --configuration Release
+
+      - name: Map ramp and door smoke test
+        run: dotnet run --project tests/UzDoomMapEditor.Core.SmokeTest/UzDoomMapEditor.Core.SmokeTest.csproj --configuration Release
