@@ -43,8 +43,9 @@ try
     Require(rebuiltSprite.PaletteIndices.SequenceEqual(new byte[] { 10, 11, 12, 13 }), "Replacement pixels did not survive rebuild.");
 
     SmokeTestActorParser();
+    SmokeTestMaterialCatalog();
 
-    Console.WriteLine("UzDoom.Core WAD round-trip and actor-state smoke tests passed.");
+    Console.WriteLine("UzDoom.Core WAD, actor-state and material catalog smoke tests passed.");
     return 0;
 }
 catch (Exception ex)
@@ -105,7 +106,50 @@ static void SmokeTestActorParser()
     Require(weapon.States.Single(state => state.Label == "Fire").Frames.Select(frame => frame.Frame).SequenceEqual(new[] { 'B', 'C' }), "Multi-frame ZScript state was not expanded.");
 }
 
+static void SmokeTestMaterialCatalog()
+{
+    var playpal = BuildPlaypal();
+    var flat = Enumerable.Range(0, 64 * 64).Select(i => (byte)(i % 256)).ToArray();
+    var lumps = new (string Name, byte[] Data)[]
+    {
+        ("PLAYPAL", playpal),
+        ("PNAMES", BuildPNames("PATCHA")),
+        ("PATCHA", BuildTwoByTwoPatch()),
+        ("TEXTURE1", BuildTexture1()),
+        ("F_START", Array.Empty<byte>()),
+        ("FLAT1", flat),
+        ("F_END", Array.Empty<byte>())
+    };
+
+    using var stream = BuildWad(lumps);
+    var wad = WadFile.Load(stream);
+    var materials = DoomMaterialCatalog.Load(wad);
+
+    var texture = materials.Single(m => m.Name == "WALLA" && m.Kind == DoomMaterialKind.Texture);
+    Require(texture.Width == 2 && texture.Height == 2, "Classic texture dimensions were decoded incorrectly.");
+    Require(texture.PaletteIndices.SequenceEqual(new byte[] { 3, 5, 4, 6 }), "Classic texture patch composition was decoded incorrectly.");
+    Require(texture.OpaqueMask.All(v => v), "Classic texture opacity was decoded incorrectly.");
+
+    var decodedFlat = materials.Single(m => m.Name == "FLAT1" && m.Kind == DoomMaterialKind.Flat);
+    Require(decodedFlat.Width == 64 && decodedFlat.Height == 64, "Flat dimensions were decoded incorrectly.");
+    Require(decodedFlat.PaletteIndices.SequenceEqual(flat), "Flat palette pixels were decoded incorrectly.");
+}
+
 static MemoryStream BuildSyntheticWad()
+{
+    var lumps = new (string Name, byte[] Data)[]
+    {
+        ("PLAYPAL", BuildPlaypal()),
+        ("S_START", Array.Empty<byte>()),
+        ("TSTA0", BuildTwoByTwoPatch()),
+        ("S_END", Array.Empty<byte>()),
+        ("KEEP", new byte[] { 1, 2, 3, 4 })
+    };
+
+    return BuildWad(lumps);
+}
+
+static byte[] BuildPlaypal()
 {
     var playpal = new byte[768];
     for (var i = 0; i < 256; i++)
@@ -114,17 +158,45 @@ static MemoryStream BuildSyntheticWad()
         playpal[i * 3 + 1] = (byte)i;
         playpal[i * 3 + 2] = (byte)i;
     }
+    return playpal;
+}
 
-    var patch = BuildTwoByTwoPatch();
-    var lumps = new (string Name, byte[] Data)[]
-    {
-        ("PLAYPAL", playpal),
-        ("S_START", Array.Empty<byte>()),
-        ("TSTA0", patch),
-        ("S_END", Array.Empty<byte>()),
-        ("KEEP", new byte[] { 1, 2, 3, 4 })
-    };
+static byte[] BuildPNames(params string[] names)
+{
+    using var stream = new MemoryStream();
+    using var writer = new BinaryWriter(stream, Encoding.ASCII, leaveOpen: true);
+    writer.Write(names.Length);
+    foreach (var name in names)
+        WriteName(writer, name);
+    writer.Flush();
+    return stream.ToArray();
+}
 
+static byte[] BuildTexture1()
+{
+    using var stream = new MemoryStream();
+    using var writer = new BinaryWriter(stream, Encoding.ASCII, leaveOpen: true);
+
+    writer.Write(1);          // texture count
+    writer.Write(8);          // offset of first maptexture
+    WriteName(writer, "WALLA");
+    writer.Write(0);          // masked
+    writer.Write((short)2);   // width
+    writer.Write((short)2);   // height
+    writer.Write(0);          // obsolete column directory
+    writer.Write((short)1);   // patch count
+    writer.Write((short)0);   // origin x
+    writer.Write((short)0);   // origin y
+    writer.Write((short)0);   // PNAMES index
+    writer.Write((short)0);   // stepdir
+    writer.Write((short)0);   // colormap
+
+    writer.Flush();
+    return stream.ToArray();
+}
+
+static MemoryStream BuildWad((string Name, byte[] Data)[] lumps)
+{
     var stream = new MemoryStream();
     using var writer = new BinaryWriter(stream, Encoding.ASCII, leaveOpen: true);
     writer.Write(Encoding.ASCII.GetBytes("PWAD"));
