@@ -6,6 +6,8 @@ internal enum EditorTool
     Vertex,
     Edge,
     Room,
+    Ramp,
+    Stairs,
     Door,
     PlayerStart
 }
