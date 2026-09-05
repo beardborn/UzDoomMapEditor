@@ -6,13 +6,15 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 
-    <!-- MapCanvas is created and configured entirely in code. Its Project/Tool
-         properties are runtime-only editor state, not WinForms designer content. -->
+    <!-- Runtime-created WinForms controls expose stateful properties that are not designer content. -->
     <NoWarn>$(NoWarn);WFO1000</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="MainForm.cs" />
     <Compile Remove="MapCanvas.cs" />
+    <Compile Remove="MapCanvasV2.cs" />
+    <Compile Remove="Map3DPreview.cs" />
   </ItemGroup>
 
   <ItemGroup>
