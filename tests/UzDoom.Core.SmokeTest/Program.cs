@@ -42,13 +42,67 @@ try
     Require(rebuiltSprite.LeftOffset == 7 && rebuiltSprite.TopOffset == 9, "Replacement offsets did not survive rebuild.");
     Require(rebuiltSprite.PaletteIndices.SequenceEqual(new byte[] { 10, 11, 12, 13 }), "Replacement pixels did not survive rebuild.");
 
-    Console.WriteLine("UzDoom.Core WAD round-trip smoke test passed.");
+    SmokeTestActorParser();
+
+    Console.WriteLine("UzDoom.Core WAD round-trip and actor-state smoke tests passed.");
     return 0;
 }
 catch (Exception ex)
 {
     Console.Error.WriteLine(ex);
     return 1;
+}
+
+static void SmokeTestActorParser()
+{
+    const string source = """
+        // DECORATE-style definition
+        actor TestZombie : Actor 3004
+        {
+            States
+            {
+            Spawn:
+                POSS AB 10 A_Look
+                Loop
+            See:
+                POSS AABBCCDD 4 A_Chase
+                Loop
+            Missile:
+                POSS E 8 Bright A_FaceTarget
+                POSS F 8 A_PosAttack
+                Goto See
+            }
+        }
+
+        /* ZScript-style definition */
+        class TestWeapon : Weapon
+        {
+            States
+            {
+            Ready:
+                PISG A 1 A_WeaponReady;
+                Loop;
+            Fire:
+                PISG BC 4;
+                Goto Ready;
+            }
+        }
+        """;
+
+    var actors = ActorDefinitionParser.Parse(source, "TEST");
+    Require(actors.Count == 2, "Actor parser did not find both DECORATE and ZScript-style definitions.");
+
+    var zombie = actors.Single(actor => actor.Name == "TestZombie");
+    Require(zombie.Parent == "Actor", "Actor parent was not parsed.");
+    Require(zombie.States.Any(state => state.Label == "Spawn" && state.Frames.Count == 2), "Spawn state frames were not expanded.");
+    var missile = zombie.States.Single(state => state.Label == "Missile");
+    Require(missile.Frames.Count == 2, "Missile state frames were not parsed.");
+    Require(missile.Frames[0].Bright, "Bright state flag was not parsed.");
+    Require(string.Equals(missile.FlowControl, "Goto See", StringComparison.OrdinalIgnoreCase), "State flow control was not parsed.");
+
+    var weapon = actors.Single(actor => actor.Name == "TestWeapon");
+    Require(weapon.Parent == "Weapon", "ZScript class parent was not parsed.");
+    Require(weapon.States.Single(state => state.Label == "Fire").Frames.Select(frame => frame.Frame).SequenceEqual(new[] { 'B', 'C' }), "Multi-frame ZScript state was not expanded.");
 }
 
 static MemoryStream BuildSyntheticWad()
