@@ -17,5 +17,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\UzDoomMapEditor.Core\UzDoomMapEditor.Core.csproj" />
+    <ProjectReference Include="..\UzDoom.Core\UzDoom.Core.csproj" />
   </ItemGroup>
 </Project>
