@@ -9,7 +9,9 @@ internal static class Program
 
         try
         {
-            Application.Run(new MainForm());
+            var form = new MainForm();
+            ActorAwareExtension.Attach(form);
+            Application.Run(form);
         }
         catch (Exception ex)
         {
