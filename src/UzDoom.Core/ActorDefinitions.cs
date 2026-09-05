@@ -112,7 +112,7 @@ public static class ActorDefinitionParser
         RegexOptions.Compiled);
 
     private static readonly Regex SpritePattern = new(
-        @"^\s*\"?(?<family>[A-Za-z0-9_]{4})\"?\s+(?<frames>[A-Za-z]+)\s+(?<tics>-?\d+)(?<rest>.*)$",
+        "^\\s*\\\"?(?<family>[A-Za-z0-9_]{4})\\\"?\\s+(?<frames>[A-Za-z]+)\\s+(?<tics>-?\\d+)(?<rest>.*)$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex FlowPattern = new(
@@ -136,11 +136,17 @@ public static class ActorDefinitionParser
 
             var openBrace = FindNextStructuralBrace(text, header.Index + header.Length);
             if (openBrace < 0)
-                break;
+            {
+                scan = header.Index + header.Length;
+                continue;
+            }
 
             var closeBrace = FindMatchingBrace(text, openBrace);
             if (closeBrace < 0)
-                break;
+            {
+                scan = header.Index + header.Length;
+                continue;
+            }
 
             var between = text[(header.Index + header.Length)..openBrace];
             var parentMatch = ParentHeader.Match(between);
@@ -317,8 +323,12 @@ public static class ActorDefinitionParser
 
             if (c == '{')
                 depth++;
-            else if (c == '}' && --depth == 0)
-                return i;
+            else if (c == '}')
+            {
+                depth--;
+                if (depth == 0)
+                    return i;
+            }
         }
 
         return -1;
