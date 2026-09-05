@@ -37,7 +37,7 @@ internal sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "UzDoom Sprite Studio v0.2";
+        Text = "UzDoom Sprite Studio v0.3";
         StartPosition = FormStartPosition.CenterScreen;
         Width = 1450;
         Height = 860;
@@ -127,7 +127,11 @@ internal sealed class MainForm : Form
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add("Export Selected PNG...", null, (_, _) => ExportSelected());
         file.DropDownItems.Add("Export Selected Family...", null, (_, _) => ExportSelectedFamily());
+        file.DropDownItems.Add("Export Family Sprite Sheet...", null, (_, _) => ExportFamilySheet());
+        file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add("Replace Selected From PNG...", null, (_, _) => ImportSelected());
+        file.DropDownItems.Add("Import Family From Folder...", null, (_, _) => ImportFamilyFolder());
+        file.DropDownItems.Add("Import Family Sprite Sheet...", null, (_, _) => ImportFamilySheet());
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add("Exit", null, (_, _) => Close());
 
@@ -135,8 +139,15 @@ internal sealed class MainForm : Form
         edit.DropDownItems.Add("Edit Selected Sprite Pixels...", null, (_, _) => EditSelectedPixels());
         edit.DropDownItems.Add("Apply Sprite Offsets", null, (_, _) => ApplyOffsets());
 
+        var spriteSet = new ToolStripMenuItem("Sprite Set");
+        spriteSet.DropDownItems.Add("Frame / Rotation Grid...", null, (_, _) => ShowSpriteSetGrid());
+        spriteSet.DropDownItems.Add(new ToolStripSeparator());
+        spriteSet.DropDownItems.Add("Auto Align Family - Center + Visible Feet", null, (_, _) => AutoAlignFamily());
+        spriteSet.DropDownItems.Add("Copy Selected Offsets To Family", null, (_, _) => CopySelectedOffsetsToFamily());
+
         menu.Items.Add(file);
         menu.Items.Add(edit);
+        menu.Items.Add(spriteSet);
         return menu;
     }
 
@@ -154,10 +165,12 @@ internal sealed class MainForm : Form
         toolbar.Items.Add(new ToolStripButton("Open", null, (_, _) => OpenWad()));
         toolbar.Items.Add(new ToolStripButton("Save As", null, (_, _) => SaveWadAs()));
         toolbar.Items.Add(new ToolStripSeparator());
+        toolbar.Items.Add(new ToolStripButton("Set Grid", null, (_, _) => ShowSpriteSetGrid()));
         toolbar.Items.Add(new ToolStripButton("Edit Pixels", null, (_, _) => EditSelectedPixels()));
-        toolbar.Items.Add(new ToolStripButton("Export PNG", null, (_, _) => ExportSelected()));
         toolbar.Items.Add(new ToolStripButton("Export Family", null, (_, _) => ExportSelectedFamily()));
-        toolbar.Items.Add(new ToolStripButton("Replace PNG", null, (_, _) => ImportSelected()));
+        toolbar.Items.Add(new ToolStripButton("Import Family", null, (_, _) => ImportFamilyFolder()));
+        toolbar.Items.Add(new ToolStripButton("Sheet Export", null, (_, _) => ExportFamilySheet()));
+        toolbar.Items.Add(new ToolStripButton("Sheet Import", null, (_, _) => ImportFamilySheet()));
         return toolbar;
     }
 
@@ -640,6 +653,37 @@ internal sealed class MainForm : Form
         }
     }
 
+    private void ExportFamilySheet()
+    {
+        if (_palette is null || CurrentFamily is not { Length: > 0 } family)
+        {
+            MessageBox.Show(this, "Select a sprite family first.", "Export Sprite Sheet", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        using var dialog = new SaveFileDialog
+        {
+            Filter = "PNG image (*.png)|*.png",
+            FileName = family + "-sheet.png",
+            Title = $"Export {family} Sprite Sheet"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+            return;
+
+        try
+        {
+            var items = EntriesForFamily(family)
+                .Select(entry => new SpriteSheetItem(entry.Name, entry.Image))
+                .ToList();
+            SpriteSheetWorkflow.Export(family, items, _palette, dialog.FileName);
+            _status.Text = $"Exported {family} sprite sheet and manifest CSV.";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Sprite-sheet export failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
     private void ImportSelected()
     {
         var entry = CurrentEntry;
@@ -668,6 +712,208 @@ internal sealed class MainForm : Form
         {
             MessageBox.Show(this, ex.Message, "Import failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    private void ImportFamilyFolder()
+    {
+        if (_palette is null || _wad is null || CurrentFamily is not { Length: > 0 } family)
+        {
+            MessageBox.Show(this, "Select a sprite family first.", "Import Family", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = $"Choose the folder containing replacement PNGs for {family}",
+            UseDescriptionForTitle = true
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+            return;
+
+        try
+        {
+            var files = Directory.EnumerateFiles(dialog.SelectedPath, "*.png", SearchOption.TopDirectoryOnly)
+                .ToDictionary(path => Path.GetFileNameWithoutExtension(path).ToUpperInvariant(), path => path, StringComparer.OrdinalIgnoreCase);
+            var prepared = new List<(SpriteEntry Entry, DoomPatchImage Image)>();
+
+            foreach (var entry in EntriesForFamily(family))
+            {
+                if (!files.TryGetValue(entry.Name, out var path))
+                    continue;
+                using var bitmap = new Bitmap(path);
+                prepared.Add((entry, SpriteBitmapFactory.FromBitmap(bitmap, _palette, entry.Image.LeftOffset, entry.Image.TopOffset)));
+            }
+
+            if (prepared.Count == 0)
+            {
+                MessageBox.Show(this, $"No PNG filenames matched the {family} lump names. Expected names such as {EntriesForFamily(family).First().Name}.png.", "Import Family", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            ApplyPreparedBatch(prepared);
+            _status.Text = $"Imported {prepared.Count:N0} replacement sprites for {family}. Save As to build the WAD.";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Family import failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void ImportFamilySheet()
+    {
+        if (_palette is null || _wad is null || CurrentFamily is not { Length: > 0 } family)
+        {
+            MessageBox.Show(this, "Select a sprite family first.", "Import Sprite Sheet", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        using var dialog = new OpenFileDialog
+        {
+            Filter = "PNG image (*.png)|*.png",
+            Title = $"Import {family} Sprite Sheet"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+            return;
+
+        List<SpriteSheetReplacement>? replacements = null;
+        try
+        {
+            replacements = SpriteSheetWorkflow.Import(dialog.FileName);
+            var byName = EntriesForFamily(family).ToDictionary(entry => entry.Name, StringComparer.OrdinalIgnoreCase);
+            var prepared = new List<(SpriteEntry Entry, DoomPatchImage Image)>();
+
+            foreach (var replacement in replacements)
+            {
+                if (!byName.TryGetValue(replacement.Name, out var entry))
+                    continue;
+                prepared.Add((entry, SpriteBitmapFactory.FromBitmap(replacement.Bitmap, _palette, entry.Image.LeftOffset, entry.Image.TopOffset)));
+            }
+
+            if (prepared.Count == 0)
+                throw new InvalidDataException($"The sheet manifest contained no sprites matching the selected {family} family.");
+
+            ApplyPreparedBatch(prepared);
+            _status.Text = $"Imported {prepared.Count:N0} sprites from the {family} sheet. Save As to build the WAD.";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Sprite-sheet import failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            if (replacements is not null)
+                foreach (var replacement in replacements)
+                    replacement.Bitmap.Dispose();
+        }
+    }
+
+    private void ShowSpriteSetGrid()
+    {
+        if (CurrentFamily is not { Length: > 0 } family)
+        {
+            MessageBox.Show(this, "Select a sprite family first.", "Sprite Set Grid", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var items = EntriesForFamily(family)
+            .Select(entry => new SpriteGridItem(entry.Name, entry.Image, entry.NameInfo))
+            .ToList();
+        using var grid = new SpriteSetGridForm(family, items, SelectSpriteByName);
+        grid.ShowDialog(this);
+    }
+
+    private void SelectSpriteByName(string name)
+    {
+        foreach (ListViewItem item in _spriteList.Items)
+        {
+            if (item.Tag is not SpriteEntry entry || !string.Equals(entry.Name, name, StringComparison.OrdinalIgnoreCase))
+                continue;
+            item.Selected = true;
+            item.Focused = true;
+            item.EnsureVisible();
+            ShowSelectedSprite();
+            return;
+        }
+    }
+
+    private void AutoAlignFamily()
+    {
+        if (_wad is null || CurrentFamily is not { Length: > 0 } family)
+        {
+            MessageBox.Show(this, "Select a sprite family first.", "Auto Align Family", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        try
+        {
+            var prepared = new List<(SpriteEntry Entry, DoomPatchImage Image)>();
+            foreach (var entry in EntriesForFamily(family))
+            {
+                var bottom = FindBottomOpaqueRow(entry.Image);
+                var topOffset = bottom >= 0 ? bottom + 1 : entry.Image.TopOffset;
+                var leftOffset = entry.Image.Width / 2;
+                prepared.Add((entry, entry.Image.WithOffsets(leftOffset, topOffset)));
+            }
+
+            ApplyPreparedBatch(prepared);
+            _status.Text = $"Auto-aligned {prepared.Count:N0} {family} sprites to horizontal center and visible feet.";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Auto align failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void CopySelectedOffsetsToFamily()
+    {
+        var selected = CurrentEntry;
+        if (_wad is null || selected is null || CurrentFamily is not { Length: > 0 } family)
+        {
+            MessageBox.Show(this, "Select a sprite first.", "Copy Offsets", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        try
+        {
+            var prepared = EntriesForFamily(family)
+                .Select(entry => (entry, entry.Image.WithOffsets(selected.Image.LeftOffset, selected.Image.TopOffset)))
+                .ToList();
+            ApplyPreparedBatch(prepared);
+            _status.Text = $"Copied {selected.Name} offsets to {prepared.Count:N0} {family} sprites.";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Copy offsets failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private static int FindBottomOpaqueRow(DoomPatchImage image)
+    {
+        for (var y = image.Height - 1; y >= 0; y--)
+        {
+            var row = y * image.Width;
+            for (var x = 0; x < image.Width; x++)
+                if (image.OpaqueMask[row + x])
+                    return y;
+        }
+        return -1;
+    }
+
+    private void ApplyPreparedBatch(IEnumerable<(SpriteEntry Entry, DoomPatchImage Image)> prepared)
+    {
+        if (_wad is null)
+            return;
+
+        var batch = prepared.ToList();
+        foreach (var item in batch)
+        {
+            var encoded = DoomPatchCodec.Encode(item.Image);
+            _wad.ReplaceLump(item.Entry.LumpIndex, encoded);
+            item.Entry.Image = item.Image;
+        }
+
+        MarkDirty();
+        PopulateSelectedFamily();
     }
 
     private void EditSelectedPixels()
@@ -907,8 +1153,8 @@ internal sealed class MainForm : Form
     {
         var file = string.IsNullOrWhiteSpace(_sourcePath) ? null : Path.GetFileName(_sourcePath);
         Text = file is null
-            ? "UzDoom Sprite Studio v0.2"
-            : $"UzDoom Sprite Studio v0.2 - {file}{(_dirty ? " *" : string.Empty)}";
+            ? "UzDoom Sprite Studio v0.3"
+            : $"UzDoom Sprite Studio v0.3 - {file}{(_dirty ? " *" : string.Empty)}";
     }
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
